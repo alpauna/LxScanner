@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes import register as register_api
+from app.config import OBD_SOURCE
+from app.hub import Hub
+from app.obd.esp32_ws import ESP32Source
+from app.obd.mock import MockOBD2Source
+from app.obd.source import OBD2Source
+from app.scope.mock import MockScopeDriver
+from app.session.recorder import SessionRecorder
+from app.state import AppState
+from app.ws.routes import router as ws_router
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+async def _pump_obd(state: AppState) -> None:
+    await state.obd_source.start()
+    async for event in state.obd_source.events():
+        await state.hub.publish_live(event)
+
+
+async def _pump_scope(state: AppState) -> None:
+    await state.scope_driver.connect()
+    async for batch in state.scope_driver.stream():
+        await state.hub.publish_scope(batch)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    hub = Hub()
+    recorder = SessionRecorder()
+    hub.on_live_event = recorder.record_live_event
+
+    obd_source: OBD2Source = ESP32Source() if OBD_SOURCE == "esp32" else MockOBD2Source()
+    logger.info("OBD2 source: %s", OBD_SOURCE)
+
+    state = AppState(
+        hub=hub,
+        obd_source=obd_source,
+        scope_driver=MockScopeDriver(),
+        recorder=recorder,
+    )
+    app.state.app_state = state
+    app.include_router(register_api(state))
+
+    obd_task = asyncio.create_task(_pump_obd(state))
+    scope_task = asyncio.create_task(_pump_scope(state))
+    try:
+        yield
+    finally:
+        obd_task.cancel()
+        scope_task.cancel()
+        await state.obd_source.stop()
+        await state.scope_driver.disconnect()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="LxScanner backend", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.include_router(ws_router)
+    return app
+
+
+app = create_app()

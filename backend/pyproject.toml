@@ -1,0 +1,26 @@
+[project]
+name = "lxscanner-backend"
+version = "0.1.0"
+description = "Backend for LxScanner: OBD2/CAN scanner + Hantek 1008C scope dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+scope = [
+    "pyusb>=1.2.1",
+]
+obd = [
+    "python-obd>=0.7.1",
+]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
