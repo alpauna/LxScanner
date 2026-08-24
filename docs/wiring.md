@@ -18,14 +18,19 @@ factory harness.
 The SN65HVD230 is 3.3V-native, so it wires directly to the ESP32 with no
 level shifter:
 
-- OBD2 pin 6 (CAN-H) → transceiver `CANH`
-- OBD2 pin 14 (CAN-L) → transceiver `CANL`
-- Transceiver `VCC` → ESP32 `3.3V`
-- Transceiver `GND` → ESP32 `GND` → OBD2 pin 4
-- Transceiver `TXD` → ESP32 GPIO5 (`CAN_TX_PIN` in `firmware/include/pins.h`)
-- Transceiver `RXD` → ESP32 GPIO4 (`CAN_RX_PIN`)
-- If the board has an `Rs` (slope control) pin, tie it to GND for
-  high-speed mode (most breakouts do this by default).
+| SN65HVD230 pin | ESP32 pin | Notes |
+|-----------------|-----------|-------|
+| `VCC`           | `3V3`     | 3.3V only -- never feed this from `5V`/`VIN` |
+| `GND`           | `GND`     | Also common with OBD2 pin 4 (chassis ground) |
+| `TXD`           | `GPIO5`   | `CAN_TX_PIN` in `firmware/include/pins.h` |
+| `RXD`           | `GPIO4`   | `CAN_RX_PIN` in `firmware/include/pins.h` |
+| `CANH`          | --        | To OBD2 pin 6 |
+| `CANL`          | --        | To OBD2 pin 14 |
+| `Rs` (if present) | `GND`   | Ties the transceiver into high-speed mode; most breakouts already do this by default |
+
+GPIO4/GPIO5 are arbitrary free pins picked for this build, not fixed by
+the ESP32's TWAI peripheral -- if you rewire to different GPIOs, update
+`CAN_TX_PIN`/`CAN_RX_PIN` in `firmware/include/pins.h` to match.
 
 **Do not add a 120Ω termination resistor** on the transceiver board when
 connected to a real vehicle -- the bus is already terminated at both ends
