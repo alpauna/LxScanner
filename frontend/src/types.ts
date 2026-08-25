@@ -32,3 +32,10 @@ export interface ScopeBatch {
   // JSON-serialized from a Python dict[int, list[float]] -- keys arrive as strings.
   channels: Record<string, number[]>;
 }
+
+export interface ScopeStatus {
+  type: "scope_status";
+  connected: boolean;
+}
+
+export type ScopeEvent = ScopeBatch | ScopeStatus;

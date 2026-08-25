@@ -14,6 +14,15 @@ On-demand calibration (calibrate_channel) runs on its own thread via
 asyncio.to_thread, so `_dev_lock` serializes it against the acquisition
 loop -- the vendor driver isn't safe for concurrent USB access from two
 threads.
+
+If a capture fails (unplugged, a loose lead, the device dropping off the
+bus), the acquisition thread doesn't just die -- it retries the USB
+connection with backoff until it succeeds or the driver is stopped, and
+pushes {"type": "scope_status", "connected": bool} events through the
+same queue as scope_batch so the frontend can show a disconnected state
+instead of silently going stale. Found 2026-08-25 after enough real
+cable-came-loose incidents during this session to notice there was no
+recovery path at all.
 """
 from __future__ import annotations
 
@@ -50,6 +59,9 @@ _DEFAULT_NS_PER_DIV = 5_000_000
 # ns_per_div/8-channel configuration so far -- see docs/hantek1008c.md.
 _BURST_DIVS = 10
 
+_RECONNECT_MIN_DELAY = 1.0
+_RECONNECT_MAX_DELAY = 10.0
+
 
 def _nearest_vscale(range_v: float) -> float:
     """Maps a requested input range in volts to the nearest of the three
@@ -73,6 +85,7 @@ class HantekScopeDriver(ScopeDriver):
         self._stop_event = threading.Event()
         self._enabled: dict[int, dict] = {ch: {"range_v": 5.0} for ch in range(8)}
         self._ns_per_div = _DEFAULT_NS_PER_DIV
+        self._connected = False
 
     async def connect(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -159,25 +172,27 @@ class HantekScopeDriver(ScopeDriver):
             await self._reopen_device()  # picks up the freshly-saved correction data
         return result
 
-    async def _open_device(self) -> None:
+    def _connect_device(self) -> Hantek1008:
+        """Blocking; runs on a worker thread. Shared by the initial
+        connect and by the reconnect loop after a dropout."""
         vscales = [
             _nearest_vscale(self._enabled.get(ch, {}).get("range_v", 5.0))
             for ch in range(8)
         ]
         active = sorted(self._enabled.keys()) or list(range(8))
+        dev = Hantek1008(
+            ns_per_div=self._ns_per_div,
+            vertical_scale_factor=vscales,
+            active_channels=active,
+            correction_data=calibration.load_correction_data(),
+        )
+        dev.connect()
+        dev.init()
+        return dev
 
-        def _connect() -> Hantek1008:
-            dev = Hantek1008(
-                ns_per_div=self._ns_per_div,
-                vertical_scale_factor=vscales,
-                active_channels=active,
-                correction_data=calibration.load_correction_data(),
-            )
-            dev.connect()
-            dev.init()
-            return dev
-
-        self._dev = await asyncio.to_thread(_connect)
+    async def _open_device(self) -> None:
+        self._dev = await asyncio.to_thread(self._connect_device)
+        self._set_connected(True)
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._acquire_loop, daemon=True)
         self._thread.start()
@@ -186,17 +201,58 @@ class HantekScopeDriver(ScopeDriver):
         await self.disconnect()
         await self._open_device()
 
+    def _set_connected(self, connected: bool) -> None:
+        if connected == self._connected:
+            return
+        self._connected = connected
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._enqueue, {"type": "scope_status", "connected": connected}
+            )
+
+    def _reconnect_with_backoff(self) -> bool:
+        """Blocks (on the acquisition thread) retrying the USB connection
+        until it succeeds or _stop_event is set. Returns False if given up
+        due to shutdown, True once reconnected."""
+        with self._dev_lock:
+            if self._dev is not None:
+                try:
+                    self._dev.close()
+                except Exception:
+                    pass
+                self._dev = None
+        self._set_connected(False)
+
+        delay = _RECONNECT_MIN_DELAY
+        while not self._stop_event.is_set():
+            try:
+                with self._dev_lock:
+                    self._dev = self._connect_device()
+                logger.info("Hantek reconnected")
+                self._set_connected(True)
+                return True
+            except Exception:
+                logger.warning(
+                    "Hantek reconnect attempt failed, retrying in %.1fs", delay
+                )
+                self._stop_event.wait(delay)
+                delay = min(delay * 1.5, _RECONNECT_MAX_DELAY)
+        return False
+
     def _acquire_loop(self) -> None:
-        assert self._dev is not None and self._loop is not None
+        assert self._loop is not None
         window_seconds = self._ns_per_div * _BURST_DIVS / 1e9
         while not self._stop_event.is_set():
             t_start = time.monotonic()
             try:
                 with self._dev_lock:
+                    assert self._dev is not None
                     result = self._dev.request_samples_burst_mode()
             except Exception:
-                logger.exception("Hantek burst capture failed, stopping acquisition")
-                return
+                logger.exception("Hantek capture failed -- USB likely disconnected")
+                if not self._reconnect_with_backoff():
+                    return  # shutting down
+                continue
             n_samples = len(next(iter(result.values()), []))
             dt = window_seconds / n_samples if n_samples else 0.0
             batch = {

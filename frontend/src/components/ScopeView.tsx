@@ -3,7 +3,7 @@ import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useSocket } from "../ws";
 import { calibrateChannel, setChannelRange, setTimebase } from "../api";
-import type { ScopeBatch } from "../types";
+import type { ScopeEvent } from "../types";
 
 interface ChannelConfig {
   id: number; // 0-7, matches the backend channel index
@@ -133,6 +133,11 @@ function makeCursorEl(orientation: "h" | "v", onStartDrag: () => void): HTMLDivE
 }
 
 export function ScopeView() {
+  // Optimistic default: the mock driver never sends scope_status events
+  // at all, and a real device that's already connected won't send one
+  // until something changes -- absence of an event should never read as
+  // "disconnected".
+  const [scopeConnected, setScopeConnected] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const buffersRef = useRef<Record<number, number[]>>(
@@ -353,7 +358,12 @@ export function ScopeView() {
     };
   }, []);
 
-  useSocket<ScopeBatch>("/ws/stream/scope", (batch) => {
+  useSocket<ScopeEvent>("/ws/stream/scope", (event) => {
+    if (event.type === "scope_status") {
+      setScopeConnected(event.connected);
+      return;
+    }
+    const batch = event;
     // Each burst-mode capture is a self-contained window (a few ms), with
     // real dead time before the next one (USB/protocol overhead between
     // captures -- see docs/hantek1008c.md). Concatenating batches into one
@@ -543,6 +553,11 @@ export function ScopeView() {
 
   return (
     <div className="scope-container">
+      {!scopeConnected && (
+        <div className="scope-disconnected-banner">
+          ⚠ Scope disconnected — attempting to reconnect…
+        </div>
+      )}
       <div
         ref={containerRef}
         className={`scope-view${panMode ? " pan-mode" : ""}${isPanning ? " pan-dragging" : ""}`}

@@ -237,3 +237,26 @@ controls rather than one-off patches:
 
 **Verified against an independent reference scope** after both fixes:
 waveform shape, timing, and amplitude all matched.
+
+## USB reconnection (2026-08-25)
+
+There was no recovery path at all if the USB connection dropped -- a
+capture failure just logged an exception and the acquisition thread
+exited permanently, leaving `/ws/stream/scope` silently going stale with
+no indication anything was wrong. Given how many times a lead/cable came
+loose over the course of this session's testing, this needed fixing.
+
+`HantekScopeDriver._acquire_loop` now calls `_reconnect_with_backoff()`
+on any capture failure instead of returning: closes the stale handle,
+retries `connect()`/`init()` with backoff (1.0s, x1.5 per attempt, capped
+at 10s) until it succeeds or the driver is stopped, and pushes
+`{"type": "scope_status", "connected": bool}` events through the same
+queue as `scope_batch` so the frontend can show a real disconnected
+state (red banner on the Scope tab) instead of just going stale.
+
+**Verified two ways**: a `dev.reset()` soft USB reset did *not* reliably
+reproduce a dropout (didn't interrupt an in-flight transfer). A real
+physical unplug/replug of the USB cable did -- observed in the backend
+log: `USBError: [Errno 32] Pipe error` -> four backoff retries -> `Hantek
+reconnected`, with the frontend's disconnected banner confirmed appearing
+and disappearing in sync.
