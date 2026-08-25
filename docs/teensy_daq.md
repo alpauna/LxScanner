@@ -158,6 +158,42 @@ useful for a permanently-mounted setup. Not needed for Phase 1/2
 bring-up -- revisit once the USB-based streaming path is proven and if
 real deployment needs (cable length, robustness) actually call for it.
 
+## Decision: keep the ESP32 (CAN) and this DAQ (scope) as separate
+## devices, not consolidated onto one chip
+
+Considered and deliberately rejected 2026-08-25: moving CAN/OBD2
+handling onto the same RT1062/Teensy 4.1 that runs the scope DAQ. The
+chip is technically capable (FlexCAN peripherals on-board, plenty of
+600MHz M7 headroom -- CAN's light interrupt-driven load wouldn't
+meaningfully compete with ADC/USB streaming), but the two subsystems
+have genuinely different physical deployment models:
+
+- The ESP32 OBD2 scanner is meant to live *at the OBD2 port*, wireless
+  over WiFi, independent of wherever the laptop sits -- mountable in the
+  vehicle (see `docs/wiring.md`).
+- This DAQ is a *bench instrument*, USB-tethered to the laptop for
+  hand-probing specific signals -- current setup is bench-only, not an
+  in-vehicle deployment.
+
+Consolidating them would mean either running a physical USB cable from
+the OBD2 port to the laptop (impractical in a vehicle) or adding a
+separate WiFi module to the RT1062 board just to recover what the ESP32
+already does natively (i.MX RT1062 has no built-in WiFi, unlike ESP32).
+It would also couple two firmware codebases with different timing
+characteristics (CAN interrupt handling vs. DMA-driven ADC/USB
+streaming) right as the DAQ's own bring-up is already the ambitious
+part -- the project has worked well so far specifically because OBD2/CAN
+and scope capture stayed cleanly separated.
+
+**Revisit later, not now**: a "condensed" single-board version
+(consolidated chip + WiFi, for a permanently-mounted in-vehicle unit
+combining both) is a real future direction worth exploring -- but only
+after the separated bench architecture (ESP32 for CAN, this DAQ for
+scope, merged in the web app) is actually proven out. Both devices
+already unify cleanly in the backend today (`OBD2Source` and
+`ScopeDriver` interfaces), so this stays purely a hardware-consolidation
+question, not an app-architecture one, whenever it comes up again.
+
 ## Ground rule
 
 No firmware logic gets written speculatively before hardware exists to
