@@ -29,7 +29,14 @@ from app.scope.hantek1008.vendor import Hantek1008
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NS_PER_DIV = 500_000  # matches the vendor lib's own default; validated on the bench
+# 5ms/div * 10 divs = 50ms total window, ~3 cycles of a 60Hz signal.
+# The vendor lib's own default (500_000 = 500us/div => 5ms total window)
+# is far too short to show anything below ~1kHz as a recognizable shape
+# -- a 60Hz sine (16.67ms period) barely moves within 5ms, showing up as
+# a flat-looking plateau near whatever point in the cycle got captured,
+# not a sine. Found 2026-08-25 with a real probe expecting to see 60Hz
+# mains pickup. See set_timebase() for reconfiguring this from the UI.
+_DEFAULT_NS_PER_DIV = 5_000_000
 
 # A burst-mode capture spans a fixed window of ns_per_div * _BURST_DIVS,
 # independent of channel count or sample count -- validated empirically
@@ -95,6 +102,21 @@ class HantekScopeDriver(ScopeDriver):
                 sample_rate_hz,
                 self._ns_per_div,
             )
+        await self._reopen_device()
+
+    async def set_channel_range(self, channel: int, range_v: float) -> None:
+        self._enabled[channel] = {**self._enabled.get(channel, {}), "range_v": range_v}
+        await self._reopen_device()
+
+    async def set_timebase(self, ns_per_div: int) -> None:
+        """Reconfigures the actual capture window (ns_per_div * _BURST_DIVS
+        total), not just the display zoom. Needed to see anything slower
+        than ~1kHz as a recognizable shape -- the default 500us/div gives
+        only a 5ms window, well under one period of e.g. a 60Hz signal.
+        Valid values follow a 1-2-5 sequence from 1ns to 200ms -- see
+        vendor.py's __burst_mode_ns_per_div_to_id_dic.
+        """
+        self._ns_per_div = ns_per_div
         await self._reopen_device()
 
     async def calibrate_channel(self, channel: int) -> dict:

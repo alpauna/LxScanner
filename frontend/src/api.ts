@@ -32,3 +32,19 @@ export async function calibrateChannel(channel: number): Promise<CalibrateResult
   const res = await fetch(`/api/scope/calibrate/${channel}`, { method: "POST" });
   return res.json();
 }
+
+export async function setChannelRange(channel: number, rangeV: number): Promise<void> {
+  await fetch(`/api/scope/channel/${channel}/range`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ range_v: rangeV }),
+  });
+}
+
+export async function setTimebase(nsPerDiv: number): Promise<void> {
+  await fetch("/api/scope/timebase", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ns_per_div: nsPerDiv }),
+  });
+}

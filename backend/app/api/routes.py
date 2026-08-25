@@ -11,6 +11,14 @@ class ModeRequest(BaseModel):
     mode: Mode
 
 
+class ChannelRangeRequest(BaseModel):
+    range_v: float
+
+
+class TimebaseRequest(BaseModel):
+    ns_per_div: int
+
+
 def register(app_state: AppState) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -46,5 +54,15 @@ def register(app_state: AppState) -> APIRouter:
     @router.post("/scope/calibrate/{channel}")
     async def calibrate_channel(channel: int) -> dict:
         return await app_state.scope_driver.calibrate_channel(channel)
+
+    @router.post("/scope/channel/{channel}/range")
+    async def set_channel_range(channel: int, req: ChannelRangeRequest) -> dict:
+        await app_state.scope_driver.set_channel_range(channel, req.range_v)
+        return {"channel": channel, "range_v": req.range_v}
+
+    @router.post("/scope/timebase")
+    async def set_timebase(req: TimebaseRequest) -> dict:
+        await app_state.scope_driver.set_timebase(req.ns_per_div)
+        return {"ns_per_div": req.ns_per_div}
 
     return router

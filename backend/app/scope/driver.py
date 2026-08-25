@@ -31,6 +31,14 @@ class ScopeDriver(ABC):
         """Yields ScopeBatch dicts (see app.models)."""
         ...
 
+    async def set_channel_range(self, channel: int, range_v: float) -> None:
+        """Reconfigures one channel's input voltage range. No-op for
+        drivers without a meaningful notion of this (e.g. the mock)."""
+
+    async def set_timebase(self, ns_per_div: int) -> None:
+        """Reconfigures the actual capture window/timebase, not just the
+        display zoom. No-op for drivers without one (e.g. the mock)."""
+
     async def calibrate_channel(self, channel: int) -> dict:
         """Measures and saves a fresh calibration point for one channel.
         Not every driver has a meaningful notion of this (e.g. the mock),

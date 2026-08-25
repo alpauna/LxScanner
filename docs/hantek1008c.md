@@ -202,3 +202,38 @@ averaged), with no need to dial in different DC voltages per point:
 **Result, verified live over `/ws/stream/scope` against the known 2V
 reference on channel 8**: -0.004V to 2.020V, under ~1% error (down from
 ~11% before calibration). All 8 channels stream cleanly with the fix.
+
+## Capture window and input range were both silently wrong for real
+## signals (2026-08-25)
+
+Found with a real 10x scope probe expecting to see 60Hz mains pickup and
+not seeing it. Two separate problems, both now fixed with real UI
+controls rather than one-off patches:
+
+1. **Capture window too short for anything below ~1kHz.** The default
+   `ns_per_div=500_000` (500us/div) gives only a 5ms total window
+   (`ns_per_div * _BURST_DIVS`). A 60Hz signal has a 16.67ms period, so
+   a 5ms capture shows well under a third of one cycle -- it looks like
+   a flat-ish plateau near whatever point in the cycle got captured, not
+   a sine. Worse, the frontend's Time/div selector only *zoomed into*
+   the already-captured window -- it never touched the real hardware
+   timebase, so there was no way to actually see more than 5ms no matter
+   what the UI said. Fixed: bumped the default to `5_000_000` (5ms/div,
+   50ms total, ~3 cycles of 60Hz), and added
+   `HantekScopeDriver.set_timebase()` / `POST /api/scope/timebase`,
+   wired to the Time/div selector so it now reconfigures the actual
+   capture window (device reopen, ~1-2s) instead of just zooming.
+2. **Signal amplitude exceeding the input range clips before it's even
+   digitized.** The default per-channel range (`range_v=5.0` ->
+   vscale 0.125, ~±2.5V headroom) is right for typical automotive sensor
+   signals but clipped this test signal (~7.7Vpp after 10x probe
+   attenuation) hard -- flat plateaus at both rails instead of a sine.
+   No amount of volts/div (a display-only zoom) fixes clipping that
+   already happened in hardware. Fixed: added
+   `HantekScopeDriver.set_channel_range()` / `POST
+   /api/scope/channel/{channel}/range` and a per-channel Range selector
+   in the UI (±1V / ±5V / ±40V, matching the hardware's actual three
+   vscale buckets -- see `_nearest_vscale`).
+
+**Verified against an independent reference scope** after both fixes:
+waveform shape, timing, and amplitude all matched.

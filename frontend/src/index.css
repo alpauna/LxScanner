@@ -253,6 +253,11 @@ main {
   width: 5.5rem;
 }
 
+.scope-channel-range {
+  font-size: 0.7rem;
+  max-width: 6.5rem;
+}
+
 .scope-channel-move {
   display: flex;
   flex-direction: column;

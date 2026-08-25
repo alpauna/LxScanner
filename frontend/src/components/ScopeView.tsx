@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useSocket } from "../ws";
-import { calibrateChannel } from "../api";
+import { calibrateChannel, setChannelRange, setTimebase } from "../api";
 import type { ScopeBatch } from "../types";
 
 interface ChannelConfig {
@@ -10,6 +10,7 @@ interface ChannelConfig {
   color: string;
   enabled: boolean;
   offset: number; // volts, shifts the trace up/down within the view
+  rangeV: number; // hardware input range -- see RANGE_OPTIONS
 }
 
 interface CursorPair {
@@ -31,31 +32,45 @@ interface PanStart {
 }
 
 const DEFAULT_CHANNELS: ChannelConfig[] = [
-  { id: 0, color: "#dc2626", enabled: true, offset: 0 }, // red
-  { id: 1, color: "#16a34a", enabled: true, offset: 0 }, // green
-  { id: 2, color: "#2563eb", enabled: true, offset: 0 }, // blue
-  { id: 3, color: "#92400e", enabled: true, offset: 0 }, // brown
-  { id: 4, color: "#000000", enabled: true, offset: 0 }, // black
-  { id: 5, color: "#eab308", enabled: true, offset: 0 }, // yellow
-  { id: 6, color: "#f97316", enabled: true, offset: 0 }, // orange
-  { id: 7, color: "#9333ea", enabled: true, offset: 0 }, // purple
+  { id: 0, color: "#dc2626", enabled: true, offset: 0, rangeV: 5 }, // red
+  { id: 1, color: "#16a34a", enabled: true, offset: 0, rangeV: 5 }, // green
+  { id: 2, color: "#2563eb", enabled: true, offset: 0, rangeV: 5 }, // blue
+  { id: 3, color: "#92400e", enabled: true, offset: 0, rangeV: 5 }, // brown
+  { id: 4, color: "#000000", enabled: true, offset: 0, rangeV: 5 }, // black
+  { id: 5, color: "#eab308", enabled: true, offset: 0, rangeV: 5 }, // yellow
+  { id: 6, color: "#f97316", enabled: true, offset: 0, rangeV: 5 }, // orange
+  { id: 7, color: "#9333ea", enabled: true, offset: 0, rangeV: 5 }, // purple
 ];
 
 const STORAGE_KEY = "lxscanner-scope-channels";
 const DIVS_X = 10;
 const DIVS_Y = 8;
+// Hardware timebase (ns_per_div) is a fixed 1-2-5 sequence, max 200ms/div
+// -- see vendor.py's __burst_mode_ns_per_div_to_id_dic. Values here are
+// in seconds and converted to ns_per_div (*1e9) when applied.
 const TIME_PER_DIV_OPTIONS = [
   0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
-  0.2, 0.5, 1, 2, 5,
+  0.2,
 ];
 const VOLTS_PER_DIV_OPTIONS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20];
+// The hardware only has 3 real input ranges (see _nearest_vscale in
+// driver.py); these values each land solidly in one bucket. Found
+// 2026-08-25: a real signal (10x probe, 60Hz pickup, ~7.7Vpp) clipped
+// hard against the default 5V range's actual ~2.5V headroom.
+const RANGE_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: "±1V (sensitive)" },
+  { value: 5, label: "±5V (sensors, default)" },
+  { value: 40, label: "±40V (ignition, mains)" },
+];
 
 function loadChannels(): ChannelConfig[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_CHANNELS;
-    const parsed = JSON.parse(raw) as ChannelConfig[];
-    if (Array.isArray(parsed) && parsed.length === 8) return parsed;
+    const parsed = JSON.parse(raw) as Partial<ChannelConfig>[];
+    if (Array.isArray(parsed) && parsed.length === 8) {
+      return parsed.map((c, i) => ({ ...DEFAULT_CHANNELS[i], ...c }));
+    }
   } catch {
     // fall through to defaults
   }
@@ -133,6 +148,8 @@ export function ScopeView() {
 
   type CalStatus = { state: "busy" | "ok" | "error"; message?: string };
   const [calStatus, setCalStatus] = useState<Record<number, CalStatus>>({});
+  const [timebaseBusy, setTimebaseBusy] = useState(false);
+  const [rangeBusy, setRangeBusy] = useState<Record<number, boolean>>({});
 
   const [frozen, setFrozen] = useState(false);
   const frozenRef = useRef(frozen);
@@ -381,6 +398,20 @@ export function ScopeView() {
     setChannels((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   }
 
+  // Reconfigures the channel's actual hardware input range -- distinct
+  // from volts/div (a display-only zoom of already-captured data). A
+  // signal that exceeds the current range clips before it's even
+  // digitized; no amount of display zoom fixes that.
+  async function applyChannelRange(id: number, rangeV: number) {
+    updateChannel(id, { rangeV });
+    setRangeBusy((s) => ({ ...s, [id]: true }));
+    try {
+      await setChannelRange(id, rangeV);
+    } finally {
+      setRangeBusy((s) => ({ ...s, [id]: false }));
+    }
+  }
+
   function moveChannel(index: number, direction: -1 | 1) {
     setChannels((prev) => {
       const next = [...prev];
@@ -478,12 +509,19 @@ export function ScopeView() {
     setZoomRange({ x: null, y: null });
   }
 
-  function applyTimePerDiv(v: number) {
-    setFrozen(true);
-    const [min, max] = zoomRange.x ?? liveXRange;
-    const center = (min + max) / 2;
-    const half = (v * DIVS_X) / 2;
-    setZoomRange((z) => ({ ...z, x: [center - half, center + half] }));
+  // Reconfigures the actual hardware capture window (not just a display
+  // zoom -- see docs/hantek1008c.md, "found needing a real 60Hz sine to
+  // display and discovering the default 5ms window can't show one").
+  // Takes a moment (device reopen), so this doesn't force a freeze --
+  // if live, the new window just shows up on the next batch.
+  async function applyTimePerDiv(v: number) {
+    setTimebaseBusy(true);
+    try {
+      await setTimebase(Math.round(v * 1e9));
+      setZoomRange((z) => ({ ...z, x: null })); // stale relative to the new window
+    } finally {
+      setTimebaseBusy(false);
+    }
   }
 
   function applyVoltsPerDiv(v: number) {
@@ -530,10 +568,11 @@ export function ScopeView() {
 
         <div className="scope-scale-controls">
           <label>
-            Time/div
+            Time/div {timebaseBusy && "…"}
             <select
               value={timePerDiv}
-              onChange={(e) => applyTimePerDiv(Number(e.target.value))}
+              disabled={timebaseBusy}
+              onChange={(e) => void applyTimePerDiv(Number(e.target.value))}
             >
               {TIME_PER_DIV_OPTIONS.map((v) => (
                 <option key={v} value={v}>
@@ -622,6 +661,19 @@ export function ScopeView() {
                   onChange={(e) => updateChannel(c.id, { offset: Number(e.target.value) })}
                   title={`Position offset: ${c.offset} V`}
                 />
+                <select
+                  className="scope-channel-range"
+                  value={c.rangeV}
+                  disabled={rangeBusy[c.id]}
+                  onChange={(e) => void applyChannelRange(c.id, Number(e.target.value))}
+                  title="Input range -- a signal exceeding this clips before it's digitized"
+                >
+                  {RANGE_OPTIONS.map((r) => (
+                    <option key={r.value} value={r.value}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
                 <div className="scope-channel-move">
                   <button onClick={() => moveChannel(i, -1)} disabled={i === 0} title="Move up">
                     ▲
