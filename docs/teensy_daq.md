@@ -144,6 +144,20 @@ host wants to buffer/record," not a fixed onboard limit.
   architecture: custom PCB design (proper per-channel analog front-end,
   connectors, enclosure).
 
+## Future consideration: Ethernet instead of/alongside USB
+
+Noted 2026-08-25, deliberately deferred -- USB is the right starting
+point (simpler bring-up, matches the wire-protocol design above). Worth
+exploring later: **the Teensy 4.1 has a built-in Ethernet PHY on-board**
+(a 4.1-specific feature, absent on the 4.0) -- QNEthernet or
+NativeEthernet libraries give real 100Mbps Ethernet with no extra
+hardware purchase needed to try it. Potential upside for an in-vehicle
+deployment: more robust/longer cable runs than USB, no host USB-driver
+quirks, and PoE-style remote power delivery is possible over Ethernet if
+useful for a permanently-mounted setup. Not needed for Phase 1/2
+bring-up -- revisit once the USB-based streaming path is proven and if
+real deployment needs (cable length, robustness) actually call for it.
+
 ## Ground rule
 
 No firmware logic gets written speculatively before hardware exists to
