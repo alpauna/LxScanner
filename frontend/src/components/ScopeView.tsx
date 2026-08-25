@@ -561,6 +561,14 @@ export function ScopeView() {
   const timePerDiv = nearestOption(TIME_PER_DIV_OPTIONS, (effectiveXRange[1] - effectiveXRange[0]) / DIVS_X);
   const voltsPerDiv = nearestOption(VOLTS_PER_DIV_OPTIONS, (effectiveYRange[1] - effectiveYRange[0]) / DIVS_Y);
 
+  // The Hantek 1008C has a fixed ~4000-sample capture budget shared
+  // evenly across active channels, independent of the timebase -- see
+  // docs/hantek1008c.md. More active channels means fewer samples/div
+  // regardless of Time/div, which is what actually limits how well a
+  // fast signal resolves, not the timebase setting itself.
+  const activeChannelCount = Math.max(channels.filter((c) => c.enabled).length, 1);
+  const estSamplesPerDiv = Math.round(4000 / activeChannelCount / DIVS_X);
+
   const deltaV = Math.abs(hCursors.b - hCursors.a);
   const deltaT = Math.abs(vCursors.b - vCursors.a);
   const freqHz = deltaT > 0 ? 1 / deltaT : null;
@@ -623,6 +631,17 @@ export function ScopeView() {
               ))}
             </select>
           </label>
+        </div>
+
+        <div
+          className={`scope-resolution-note ${
+            estSamplesPerDiv < 20 ? "scope-res-bad" : estSamplesPerDiv < 50 ? "scope-res-marginal" : ""
+          }`}
+          title="The device has a fixed ~4000-sample capture budget split evenly across active channels, independent of Time/div -- fewer active channels means finer resolution on fast signals in the same capture. See docs/hantek1008c.md."
+        >
+          ~{estSamplesPerDiv} samples/div ({activeChannelCount} ch active)
+          {estSamplesPerDiv < 20 && " -- too few for fast signals, disable channels"}
+          {estSamplesPerDiv >= 20 && estSamplesPerDiv < 50 && " -- marginal for fast signals"}
         </div>
 
         <div className="scope-cursor-controls">

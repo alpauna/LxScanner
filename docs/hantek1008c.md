@@ -260,3 +260,112 @@ physical unplug/replug of the USB cable did -- observed in the backend
 log: `USBError: [Errno 32] Pipe error` -> four backoff retries -> `Hantek
 reconnected`, with the frontend's disconnected banner confirmed appearing
 and disappearing in sync.
+
+## Single-sample "jump" artifact -- investigated, root cause not yet
+## isolated (2026-08-25)
+
+Reported viewing a genuinely clean signal (the 24VAC transformer, same
+one used in the very first bring-up test) at 1ms/div: the waveform
+showed a sharp near-vertical jump partway through an otherwise-smooth
+ramp -- not physically plausible for a 60Hz sine, and specifically a
+concern because a diagnostic tool showing a fake transient is actively
+misleading, worse than showing nothing.
+
+**Ruled out** (each backed by a direct raw-hardware test, not just a
+plausible-sounding theory):
+
+- **Not the batch-concatenation bug from earlier** (the one fixed by
+  making each batch replace the display instead of appending). Captured
+  raw single-channel data directly from the vendor driver, bypassing the
+  whole frontend/backend pipeline entirely -- the jump is present in the
+  raw sample array itself, one array, no batches involved.
+- **Not cross-channel ADC-mux crosstalk**, despite being a reasonable
+  first guess (multiple channels sharing one ADC, time-multiplexed,
+  could plausibly bleed into each other). Tested with only channel 1
+  active (no other channel to interfere): the jump still occurred
+  (2.83V single-sample step, n=4000 samples).
+- **Not random electrical noise on the signal**. Ran 6 repeated captures
+  at identical settings (1 channel active, 1ms/div): every single one
+  had exactly one large jump (>0.3V, physically impossible for this
+  signal at this sample rate), and it landed at **sample index 563 four
+  times and 565 twice** -- consistent, not randomly distributed. Random
+  noise would land at random positions; this doesn't.
+- **Not the readout's two-part USB command structure** (`__send_cmd(0xc6/0xa6, parameter=0x02)`
+  then `...=0x03)`, concatenated before being split into samples --
+  a very plausible seam for exactly this kind of artifact). Called the
+  private two-part readout directly: with 1 channel active, the `0x02`
+  part came back **empty** and all 4000 samples were in one contiguous
+  `0x03` block -- no seam at index 563 to explain it.
+
+**Not yet isolated**: what specifically causes it. Given it's
+deterministic (same index, repeatably) but not explained by the known
+protocol structure, it's most plausibly an internal, undocumented
+behavior of the device's own capture-buffer management (e.g. an internal
+DMA/buffer-refill boundary we have no visibility into -- there is no
+protocol documentation for this device beyond what's been reverse
+engineered) rather than anything in this codebase. Not confirmed either
+way with certainty.
+
+**Deliberately not fixed yet**: the obvious mitigation is a despike
+filter (detect an isolated single-sample outlier surrounded by two
+close-together neighbors, replace it), but silently correcting displayed
+data in a *diagnostic* tool is a real decision, not a safe default -- a
+naive despike filter can't reliably distinguish "impossible glitch" from
+"real fast transient the user specifically needs to see" (an ignition
+spark, an injector opening edge, etc.), and hiding the latter would be
+worse than the original problem. Needs a decision on the actual approach
+(e.g. correct-but-visibly-flag vs. leave raw and document vs. further
+investigation into the timing) before implementing anything that alters
+displayed values.
+
+## Fixed ~4000-sample memory depth, shared across active channels
+## (2026-08-25) -- this is the real reason "60Hz looks good / 1kHz looks
+## bad" (or vice versa), not a bug
+
+Directly relevant to why a signal that varies a lot in the time domain
+(needing both a wide window to show slow content and fine resolution to
+show fast content in the same capture) can look bad: burst-mode capture
+has a **fixed total sample budget that does not scale with the requested
+time window**, confirmed empirically by sweeping `ns_per_div` from
+100us/div to 200ms/div (a 2000x range) with 1 channel active -- every
+single setting returned exactly **4000 samples**. Widening the window
+doesn't cost you samples; the device just spreads the same fixed budget
+across more time (courser `dt`), and narrowing it spreads the same
+budget across less time (finer `dt`). This budget is **shared evenly
+across active channels**, confirmed separately: 4000 samples/channel at
+1 channel active, 2000 at 2 channels, 500 at 8 channels -- consistent
+with a genuine fixed hardware memory depth (a very typical "4K-point"
+budget spec for a scope in this price class), not a software or protocol
+limitation. (One data point, `ns_per_div=100_000_000` (100ms/div), failed
+with a protocol handshake error rather than returning data -- a separate,
+unexplained issue, not a memory-depth question.)
+
+**Why this explains the reported symptom**: with **8 channels active**,
+you only get 500 samples total. A window wide enough to show several 60Hz
+cycles (e.g. 50ms) leaves `dt = 50ms / 500 = 100us/sample` -- only ~10
+samples per 1kHz cycle layered on top, visibly rough. With only **1-2
+channels active**, the same 50ms window gives `dt = 50ms / 4000 = 12.5us`
+-- ~80 samples per 1kHz cycle, while still showing multiple 60Hz cycles,
+**in the same single capture**. The fix for wanting to see both a slow
+and a fast signal well isn't a different timebase setting -- it's fewer
+simultaneously active channels, since that's what actually controls the
+per-channel sample budget.
+
+**This also means zooming never loses data.** Every pan/cursor/zoom
+operation in the frontend operates on the already-fully-captured sample
+array for the whole window -- there's no re-capture or decimation
+involved. So the right capture strategy is: minimize active channels for
+a precision capture, pick `ns_per_div` wide enough to comfortably show
+the slowest signal of interest (doesn't cost any resolution to go wider,
+per the above), then pan/zoom into whatever sub-region needs a closer
+look -- the full-density real data for the entire window is already
+there to zoom into.
+
+**Hard ceiling, not fixable by a driver rewrite.** This 4000-sample
+budget is the device's physical capture memory, not a limitation of
+`mfg92/hantek1008py`'s protocol implementation -- reimplementing the USB
+driver from scratch would not change it. If this ceiling turns out to be
+a real constraint for the intended use (capturing genuinely
+wide-bandwidth automotive signals -- ignition, injector, wideband O2,
+etc. -- across many channels simultaneously with real resolution on
+fast content), it's a hardware capability question, not a software one.

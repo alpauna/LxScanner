@@ -171,6 +171,22 @@ main {
   gap: 0.15rem;
 }
 
+.scope-resolution-note {
+  font-size: 0.7rem;
+  color: #999;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid #333;
+}
+
+.scope-res-marginal {
+  color: #eab308;
+}
+
+.scope-res-bad {
+  color: #f87171;
+  font-weight: bold;
+}
+
 .scope-cursor-controls {
   display: flex;
   flex-direction: column;
