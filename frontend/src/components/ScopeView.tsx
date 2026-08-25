@@ -11,6 +11,7 @@ interface ChannelConfig {
   enabled: boolean;
   offset: number; // volts, shifts the trace up/down within the view
   rangeV: number; // hardware input range -- see RANGE_OPTIONS
+  attenuation: number; // probe ratio (1, 10, 20, 100) -- see ATTENUATION_OPTIONS
 }
 
 interface CursorPair {
@@ -32,14 +33,14 @@ interface PanStart {
 }
 
 const DEFAULT_CHANNELS: ChannelConfig[] = [
-  { id: 0, color: "#dc2626", enabled: true, offset: 0, rangeV: 5 }, // red
-  { id: 1, color: "#16a34a", enabled: true, offset: 0, rangeV: 5 }, // green
-  { id: 2, color: "#2563eb", enabled: true, offset: 0, rangeV: 5 }, // blue
-  { id: 3, color: "#92400e", enabled: true, offset: 0, rangeV: 5 }, // brown
-  { id: 4, color: "#000000", enabled: true, offset: 0, rangeV: 5 }, // black
-  { id: 5, color: "#eab308", enabled: true, offset: 0, rangeV: 5 }, // yellow
-  { id: 6, color: "#f97316", enabled: true, offset: 0, rangeV: 5 }, // orange
-  { id: 7, color: "#9333ea", enabled: true, offset: 0, rangeV: 5 }, // purple
+  { id: 0, color: "#dc2626", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // red
+  { id: 1, color: "#16a34a", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // green
+  { id: 2, color: "#2563eb", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // blue
+  { id: 3, color: "#92400e", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // brown
+  { id: 4, color: "#000000", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // black
+  { id: 5, color: "#eab308", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // yellow
+  { id: 6, color: "#f97316", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // orange
+  { id: 7, color: "#9333ea", enabled: true, offset: 0, rangeV: 5, attenuation: 1 }, // purple
 ];
 
 const STORAGE_KEY = "lxscanner-scope-channels";
@@ -61,6 +62,19 @@ const RANGE_OPTIONS: { value: number; label: string }[] = [
   { value: 1, label: "±1V (sensitive)" },
   { value: 5, label: "±5V (sensors, default)" },
   { value: 40, label: "±40V (ignition, mains)" },
+];
+// Probe/attenuator ratio, applied as a display-only multiplier on top of
+// the already-calibrated instrument-input voltage -- the actual value at
+// the probe tip is attenuation x what the scope's input sees. Distinct
+// from RANGE_OPTIONS: range describes the scope's own input headroom
+// (what clips), attenuation describes what's between the tip and that
+// input. Found 2026-08-25: readings need this to mean anything with a
+// 10:1 scope probe, a 20:1 Hantek attenuator, or a 100:1 probe attached.
+const ATTENUATION_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: "1:1 (direct)" },
+  { value: 10, label: "10:1 probe" },
+  { value: 20, label: "20:1 attenuator" },
+  { value: 100, label: "100:1 probe" },
 ];
 
 function loadChannels(): ChannelConfig[] {
@@ -210,9 +224,9 @@ export function ScopeView() {
   function buildSeriesData(): uPlot.AlignedData {
     const visible = channelsRef.current.filter((c) => c.enabled);
     const series = visible.map((c) =>
-      c.offset === 0
+      c.attenuation === 1 && c.offset === 0
         ? buffersRef.current[c.id]
-        : buffersRef.current[c.id].map((v) => v + c.offset),
+        : buffersRef.current[c.id].map((v) => v * c.attenuation + c.offset),
     );
     return [xBufferRef.current, ...series] as unknown as uPlot.AlignedData;
   }
@@ -676,6 +690,20 @@ export function ScopeView() {
                   onChange={(e) => updateChannel(c.id, { offset: Number(e.target.value) })}
                   title={`Position offset: ${c.offset} V`}
                 />
+                <div className="scope-channel-move">
+                  <button onClick={() => moveChannel(i, -1)} disabled={i === 0} title="Move up">
+                    ▲
+                  </button>
+                  <button
+                    onClick={() => moveChannel(i, 1)}
+                    disabled={i === channels.length - 1}
+                    title="Move down"
+                  >
+                    ▼
+                  </button>
+                </div>
+              </div>
+              <div className="scope-channel-settings-row">
                 <select
                   className="scope-channel-range"
                   value={c.rangeV}
@@ -689,18 +717,18 @@ export function ScopeView() {
                     </option>
                   ))}
                 </select>
-                <div className="scope-channel-move">
-                  <button onClick={() => moveChannel(i, -1)} disabled={i === 0} title="Move up">
-                    ▲
-                  </button>
-                  <button
-                    onClick={() => moveChannel(i, 1)}
-                    disabled={i === channels.length - 1}
-                    title="Move down"
-                  >
-                    ▼
-                  </button>
-                </div>
+                <select
+                  className="scope-channel-atten"
+                  value={c.attenuation}
+                  onChange={(e) => updateChannel(c.id, { attenuation: Number(e.target.value) })}
+                  title="Probe/attenuator ratio -- scales the displayed voltage to match what's actually at the probe tip"
+                >
+                  {ATTENUATION_OPTIONS.map((a) => (
+                    <option key={a.value} value={a.value}>
+                      {a.label}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="scope-channel-cal-row">
                 <button

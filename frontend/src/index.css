@@ -267,9 +267,16 @@ main {
   width: 5.5rem;
 }
 
-.scope-channel-range {
+.scope-channel-settings-row {
+  display: flex;
+  gap: 0.4rem;
+  padding-left: 1.9rem;
+}
+
+.scope-channel-range,
+.scope-channel-atten {
   font-size: 0.7rem;
-  max-width: 6.5rem;
+  max-width: 7.5rem;
 }
 
 .scope-channel-move {

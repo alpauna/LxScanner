@@ -51,16 +51,36 @@ docs/       Wiring/power notes, Hantek 1008C driver notes
 
 ## Status
 
-- **Backend**: working end-to-end with mock OBD2/scope data sources, so
-  the full stack runs and streams realistic fake data with no hardware
-  attached at all.
-- **Frontend**: built (Live PIDs, DTCs, CAN Capture, 8-channel Scope
-  tabs), not yet run in this environment — no Node.js available here.
+- **Hantek 1008C scope**: live and verified against real hardware,
+  including an independent reference scope confirming waveform shape,
+  timing, and amplitude all match. Full writeup in
+  `docs/hantek1008c.md`. Working:
+  - Real (patched) driver on a background thread, streamed over
+    `/ws/stream/scope`.
+  - Per-unit voltage calibration using the scope's own built-in cal
+    signal — standalone script for calibrating all 8 channels from
+    scratch, or an on-demand "Recalibrate" button per channel in the UI
+    (cable/contact quality drifts, so this is meant to be re-run, not a
+    one-time setup step).
+  - Scope tab: one big overlay chart, per-channel color/enable/reorder/
+    vertical-offset controls, draggable voltage/time cursors with live
+    ΔV/Δt/frequency readouts, a pan tool, and real Time/div + Volts/div +
+    per-channel input-range controls that reconfigure the actual
+    hardware (not just a display zoom) — plus a probe/attenuator ratio
+    setting (1:1/10:1/20:1/100:1) so the displayed voltage matches what's
+    actually at the probe tip.
+  - USB reconnection with backoff if the connection drops (a lead coming
+    loose, etc.), with a status banner in the UI — verified against a
+    real physical unplug/replug.
+- **Backend**: also runs with mock OBD2/scope data sources when no
+  hardware is attached, for frontend/UI development.
+- **Frontend**: React + Vite dashboard (Live PIDs, DTCs, CAN Capture,
+  Scope tabs).
 - **Firmware**: WiFi + TWAI CAN + OBD-II mode 01 (PIDs) / 03 (read DTCs) /
   04 (clear DTCs) + raw capture mode. Compiles cleanly against the ESP32
-  Arduino framework; not yet flashed/tested against real hardware.
-- **Hantek 1008C driver**: not started yet (planned next phase — see
-  `docs/hantek1008c.md` for the approach and known risks).
+  Arduino framework; not yet flashed/tested against real hardware (next
+  phase — the scope side got tested first since the hardware was already
+  on hand).
 
 ## Running the backend (mock data, no hardware needed)
 
@@ -73,6 +93,9 @@ python3 -m venv .venv
 
 REST API at `http://localhost:8000/api/*`, WebSocket streams at
 `/ws/stream/live` and `/ws/stream/scope`.
+
+Set `LXSCANNER_OBD_SOURCE=esp32` and/or `LXSCANNER_SCOPE_SOURCE=hantek`
+to switch either source off its mock and onto real hardware.
 
 ## Running the frontend
 
@@ -96,3 +119,23 @@ Wiring and power details for the SN65HVD230 CAN transceiver and the OBD2
 connector are in `docs/wiring.md`. Run the backend with
 `LXSCANNER_OBD_SOURCE=esp32` to switch it off the mock source and onto the
 real board.
+
+## Calibrating the Hantek 1008C
+
+The driver's raw-to-volt conversion isn't accurate per-unit out of the
+box (~11% error observed) until calibrated against a known voltage —
+conveniently, the 1008C has a built-in 2Vp-p 1kHz cal/probe-comp output
+that works for this. To calibrate all 8 channels from scratch:
+
+```sh
+cd backend
+.venv/bin/python scripts/calibrate_hantek.py
+```
+
+Needs the backend stopped first (only one process can hold the USB
+device). It'll prompt you to move the cal output's wire to each channel
+in turn. To recalibrate a single channel later — cable/contact quality
+drifts, so this isn't a one-time step — use the "Recalibrate" button on
+that channel in the Scope tab instead; it does the same measurement
+without needing to stop the backend. Full details in
+`docs/hantek1008c.md`.
