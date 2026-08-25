@@ -13,3 +13,4 @@ frontend/tsconfig.tsbuildinfo
 # Firmware
 firmware/.pio/
 firmware/include/secrets.h
+firmware-stm32/.pio/
