@@ -20,3 +20,15 @@ export async function stopSession(): Promise<void> {
 export async function clearDtc(): Promise<void> {
   await fetch("/api/dtc/clear", { method: "POST" });
 }
+
+export interface CalibrateResult {
+  ok: boolean;
+  reason?: string;
+  low_v?: number;
+  high_v?: number;
+}
+
+export async function calibrateChannel(channel: number): Promise<CalibrateResult> {
+  const res = await fetch(`/api/scope/calibrate/${channel}`, { method: "POST" });
+  return res.json();
+}

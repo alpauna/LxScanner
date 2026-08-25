@@ -8,11 +8,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import register as register_api
-from app.config import OBD_SOURCE
+from app.config import OBD_SOURCE, SCOPE_SOURCE
 from app.hub import Hub
 from app.obd.esp32_ws import ESP32Source
 from app.obd.mock import MockOBD2Source
 from app.obd.source import OBD2Source
+from app.scope.driver import ScopeDriver
 from app.scope.mock import MockScopeDriver
 from app.session.recorder import SessionRecorder
 from app.state import AppState
@@ -43,10 +44,19 @@ async def lifespan(app: FastAPI):
     obd_source: OBD2Source = ESP32Source() if OBD_SOURCE == "esp32" else MockOBD2Source()
     logger.info("OBD2 source: %s", OBD_SOURCE)
 
+    scope_driver: ScopeDriver
+    if SCOPE_SOURCE == "hantek":
+        from app.scope.hantek1008.driver import HantekScopeDriver
+
+        scope_driver = HantekScopeDriver()
+    else:
+        scope_driver = MockScopeDriver()
+    logger.info("Scope source: %s", SCOPE_SOURCE)
+
     state = AppState(
         hub=hub,
         obd_source=obd_source,
-        scope_driver=MockScopeDriver(),
+        scope_driver=scope_driver,
         recorder=recorder,
     )
     app.state.app_state = state

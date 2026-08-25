@@ -79,3 +79,126 @@ specific unit once the calibration-mismatch assertions are relaxed. The
 7-second keepalive requirement and true max sustained sample rate under
 continuous streaming (as opposed to one-off capture calls) still need
 validation before the `ScopeDriver` wrapper is built.
+
+## ScopeDriver integration (2026-08-25)
+
+`backend/app/scope/hantek1008/driver.py` implements `ScopeDriver` on top of
+the vendored driver: burst-mode captures run back-to-back on a background
+thread (pyusb is blocking) and cross into asyncio via a queue. Verified
+live end-to-end: `LXSCANNER_SCOPE_SOURCE=hantek`, connect a client to
+`/ws/stream/scope`, and channel 0 (the 24VAC transformer signal) visibly
+oscillates batch-to-batch, confirming this is a live changing waveform
+flowing through the real backend, not a frozen reading.
+
+**Range/vscale gotcha found during this test**: the hardware only offers
+three vertical scale factors (0.02, 0.125, 1.0), and `driver.py` maps a
+requested `range_v` to the nearest one (`_nearest_vscale`). The driver's
+default per-channel `range_v` is 5.0, which maps to the 0.125 (more
+sensitive, narrower-range) scale -- correct for typical automotive sensor
+signals (most are 0-5V), but it visibly clips/distorts a signal as large
+as the 24VAC transformer (~34V peak): readings came back in the
+single-digit volts range instead of the correct ~±30V. Explicitly
+configuring that channel with `range_v=40` (mapping to the 1.0 scale) via
+`configure_channels()` fixed it and matched the earlier raw bench-test
+readings. **Any channel expected to see more than a few volts (ignition
+primary, injector drivers, this transformer test signal, etc.) needs its
+range configured wider than the 5V default before capturing it** -- there
+is no REST/UI control for this yet (still TODO), only the
+`configure_channels()` method itself.
+
+## dt/timing bug found and fixed (2026-08-25)
+
+The frontend's time/div and voltage-cursor-derived frequency readings were
+wrong, discovered using a real 2V-peak 1kHz square wave (verified against
+an independent scope) fed into one channel. Root cause: `driver.py`
+originally computed `dt = wall_clock_call_duration / n_samples`. That's
+wrong -- the wall-clock duration of a `request_samples_burst_mode()` call
+is dominated by USB/protocol overhead (the readout is ~125 separate
+64-byte transfers, each with a mandated 2ms inter-transfer sleep in the
+vendor driver's `__write_and_receive`), not real sample timing. Measured
+against the known 1kHz square wave: raw samples showed a clean ~50-high/
+~50-low repeating pattern (100 samples/cycle), so the true rate is
+`(1/1000s) / 100 = 10us/sample`. The old wall-clock-based estimate gave
+~779us/sample at the same settings -- **~77x too slow** -- which explains
+both symptoms reported: the waveform looked corrupted (a 1ms period
+signal displayed as if its period were ~77ms is unrecognizable) and the
+frontend's auto time/div kept landing on a huge fixed-feeling value (the
+4000-sample rolling buffer, at the inflated dt, appeared to span several
+seconds instead of tens of milliseconds).
+
+Fix: derive `dt` from the device's configured window instead of wall-clock
+timing. Empirically, a burst capture spans a fixed time window of
+`ns_per_div * 10` regardless of channel/sample count (500 samples/ch at
+the default `ns_per_div=500_000` with 8 channels gives exactly the
+10us/sample computed above: `500_000ns * 10 / 500 = 10_000ns = 10us`).
+`_BURST_DIVS = 10` and `dt = (ns_per_div * _BURST_DIVS / 1e9) / n_samples`
+in `driver.py` now uses this. **Only verified at the default
+ns_per_div/8-channel configuration** -- if `ns_per_div` or active channel
+count changes, re-verify against a known-frequency signal before trusting
+the timebase.
+
+## Voltage calibration (2026-08-25)
+
+With the dt fix in place, waveform shape and timing were confirmed
+correct, but the measured *amplitude* was still off (~2.22V measured vs.
+a known 2.00V peak reference -- ~11% high). Root cause: the vendor
+driver's raw-to-volt conversion (`__raw_to_volt` in vendor.py) uses a
+fixed nominal gain constant (`0.01 * vscale`), not one calibrated for
+this specific unit. Since this unit's calibration EEPROM already reads
+differently from the reference unit the driver was written against (the
+four mismatched `_init3()` bytes noted above), its actual analog
+front-end gain is plausibly off by a similar margin, and nothing
+compensates for that without real per-unit calibration data.
+
+Fix: a two-part calibration pipeline, mirroring upstream csvexport.py's
+`--calibrate`/`-c` flow but adapted to run against our patched vendor
+driver and, more conveniently, against the Hantek 1008C's own built-in
+2Vp-p 1kHz calibration/probe-comp output rather than an external bench
+supply. That output is a single pin (confirmed 0V-2V unipolar,
+ground-referenced), moved by hand between channels -- but since it's a
+clean two-level square wave, one burst capture gives both the 0V and 2V
+calibration points at once (thresholded at the midpoint, each half
+averaged), with no need to dial in different DC voltages per point:
+
+- `backend/scripts/calibrate_hantek.py` -- interactive script you run
+  yourself (physical access to move the cal output's wire is required,
+  so this can't be automated). Prompts once per channel to connect the
+  cal output there, captures a burst, splits it into high/low levels,
+  and writes `backend/data/hantek_calibration_raw.json`. Currently
+  calibrates only at vscale 0.125 (matching `HantekScopeDriver`'s
+  default `range_v=5.0`) -- re-run for a different vscale/range if you
+  routinely capture larger signals with a different `range_v`.
+- `driver.py::_load_correction_data` -- loads that file (if present),
+  converts each calibration point into a `correction_factor` using the
+  same formula as upstream (`test_voltage / (units * 0.01 * vscale)`),
+  and passes the result as `correction_data` into the `Hantek1008`
+  constructor. Falls back to nominal (uncalibrated) scaling with a
+  logged warning if no calibration file exists yet -- this is the
+  current default state until the script above is run.
+
+**Two more real bugs found running this for the first time:**
+
+1. The script's `input()` waits (while you physically move the cal
+   output's wire between channels) took longer than the device's
+   7-second keepalive timeout with no commands being sent, causing a USB
+   disconnect (`usb.core.USBError: [Errno 19] No such device`) partway
+   through the first run -- and the already-measured channel's data was
+   lost because `device.close()` also failed against the now-gone
+   device, crashing before the output file got written. Fixed: the
+   script now runs `device.pause()`/`cancel_pause()` around each
+   `input()` wait (keeping it alive indefinitely), and file-saving no
+   longer depends on `device.close()` succeeding. It's also resumable --
+   re-running loads already-calibrated channels from the existing output
+   file.
+2. **A real upstream bug** in `vendor.py`'s
+   `__calc_correction_factor`: when a channel/vscale has exactly one
+   correction point (the normal case here -- the 0V point is
+   intentionally excluded from `correction_data`, matching upstream's
+   own convention), it did `channel_cd[0]`, indexing a dict keyed by raw
+   ADC delta values (e.g. `1673.19`) as if it were a list -- guaranteed
+   `KeyError` unless a point's delta happened to be exactly 0. Fixed to
+   `next(iter(channel_cd.values()))`.
+
+**Result, verified live over `/ws/stream/scope` against the known 2V
+reference on channel 8**: -0.004V to 2.020V, under ~1% error (down from
+~11% before calibration). All 8 channels stream cleanly with the fix.

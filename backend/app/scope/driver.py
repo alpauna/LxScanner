@@ -30,3 +30,10 @@ class ScopeDriver(ABC):
     def stream(self) -> AsyncIterator[dict]:
         """Yields ScopeBatch dicts (see app.models)."""
         ...
+
+    async def calibrate_channel(self, channel: int) -> dict:
+        """Measures and saves a fresh calibration point for one channel.
+        Not every driver has a meaningful notion of this (e.g. the mock),
+        so it's concrete-with-a-default rather than abstract; returns
+        {"ok": False, "reason": ...} unless overridden."""
+        return {"ok": False, "reason": "This scope driver does not support calibration"}

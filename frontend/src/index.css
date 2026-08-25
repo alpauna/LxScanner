@@ -89,6 +89,223 @@ main {
   text-align: left;
 }
 
+.scope-container {
+  position: relative;
+  width: 100%;
+  height: 75vh;
+  min-height: 420px;
+}
+
 .scope-view {
   width: 100%;
+  height: 100%;
+  background: #e9e9e9;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.scope-view .u-wrap {
+  background: #e9e9e9;
+}
+
+.scope-channel-panel {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem;
+  background: rgba(17, 17, 17, 0.88);
+  border: 1px solid #333;
+  border-radius: 8px;
+  max-height: calc(100% - 1.5rem);
+  overflow-y: auto;
+}
+
+.scope-toolbar {
+  display: flex;
+  gap: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #333;
+}
+
+.scope-pan-active {
+  border-color: #6cf;
+  font-weight: bold;
+}
+
+.scope-view.pan-mode {
+  cursor: grab;
+}
+
+.scope-view.pan-dragging {
+  cursor: grabbing;
+}
+
+.scope-scale-controls {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #333;
+  font-size: 0.8rem;
+}
+
+.scope-scale-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.scope-cursor-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #333;
+  font-size: 0.8rem;
+}
+
+.scope-cursor-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.scope-readout {
+  color: #6cf;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+}
+
+.scope-zoom-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+}
+
+.scope-channel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.scope-channel-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid #262626;
+}
+
+.scope-channel-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.scope-channel-cal-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  padding-left: 1.9rem;
+}
+
+.scope-channel-cal-row button {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.scope-cal-status {
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scope-cal-ok {
+  color: #4ade80;
+}
+
+.scope-cal-error {
+  color: #f87171;
+}
+
+.scope-channel-row input[type="color"] {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.scope-channel-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 3.5rem;
+}
+
+.scope-channel-offset {
+  width: 5.5rem;
+}
+
+.scope-channel-move {
+  display: flex;
+  flex-direction: column;
+  line-height: 0.7;
+}
+
+.scope-channel-move button {
+  font-size: 0.6rem;
+  padding: 0.05rem 0.3rem;
+}
+
+.scope-cursor {
+  position: absolute;
+  display: none;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.scope-cursor-h {
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed #00b8d9;
+  cursor: ns-resize;
+}
+
+.scope-cursor-v {
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #d900a3;
+  cursor: ew-resize;
+}
+
+.scope-cursor-label {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: move;
+}
+
+.scope-cursor-h .scope-cursor-label {
+  left: 2px;
+  top: -14px;
+}
+
+.scope-cursor-v .scope-cursor-label {
+  top: 2px;
+  left: 2px;
 }

@@ -7,6 +7,10 @@ PORT = 8000
 # /ws/ingest/obd). Override with LXSCANNER_OBD_SOURCE=esp32.
 OBD_SOURCE = os.environ.get("LXSCANNER_OBD_SOURCE", "mock")
 
+# "mock" (default, no hardware needed) or "hantek" (real Hantek 1008C over
+# USB). Override with LXSCANNER_SCOPE_SOURCE=hantek.
+SCOPE_SOURCE = os.environ.get("LXSCANNER_SCOPE_SOURCE", "mock")
+
 # Standard OBD-II PIDs polled in scanner mode (mode 01).
 SCANNER_PIDS: dict[str, tuple[str, str]] = {
     "0C": ("rpm", "rpm"),

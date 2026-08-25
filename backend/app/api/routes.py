@@ -43,4 +43,8 @@ def register(app_state: AppState) -> APIRouter:
         app_state.obd_source.request_dtc_clear()
         return {"status": "requested"}
 
+    @router.post("/scope/calibrate/{channel}")
+    async def calibrate_channel(channel: int) -> dict:
+        return await app_state.scope_driver.calibrate_channel(channel)
+
     return router
