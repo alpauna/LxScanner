@@ -46,8 +46,8 @@ SDK).
 backend/         FastAPI app: ingest, decoding, session recording, WebSocket hub
 frontend/        React + Vite dashboard
 firmware/        ESP32 (PlatformIO) firmware: TWAI CAN + OBD-II + WiFi uplink
-firmware-stm32/  STM32H7 (PlatformIO) firmware: custom multi-channel DAQ, see docs/stm32_daq.md
-docs/            Wiring/power notes, Hantek 1008C driver notes, STM32 DAQ design
+firmware-teensy/ Teensy 4.1 (PlatformIO) firmware: custom multi-channel DAQ, see docs/teensy_daq.md
+docs/            Wiring/power notes, Hantek 1008C driver notes, Teensy DAQ design
 ```
 
 ## Status
@@ -82,17 +82,22 @@ docs/            Wiring/power notes, Hantek 1008C driver notes, STM32 DAQ design
   Arduino framework; not yet flashed/tested against real hardware (next
   phase — the scope side got tested first since the hardware was already
   on hand).
-- **STM32H7 + AD7606 custom DAQ**: in progress, replacing the Hantek's
+- **Teensy 4.1 + AD7606 custom DAQ**: in progress, replacing the Hantek's
   fixed ~4000-sample memory-depth ceiling (confirmed hard hardware limit,
   not a driver issue — see `docs/hantek1008c.md`) with continuous
   streaming and true per-channel simultaneous sampling. Full design in
-  `docs/stm32_daq.md`. Phase 0 (project scaffold, compiles cleanly
-  against a Nucleo-H743ZI2) is done; proof-of-concept hardware is on
-  order before any peripheral-driving firmware gets written. The Hantek
-  isn't going away — it stays a valid option for anyone who understands
-  its limits, and its calibration/UI work carries forward regardless
-  (the new driver plugs into the same `ScopeDriver` interface with zero
-  frontend changes).
+  `docs/teensy_daq.md`, including the MCU selection story (STM32H7 was
+  the original plan, but no ST Nucleo board actually exposes true USB-HS
+  without an external PHY chip, and the one Discovery board that does
+  wasn't in stock — Teensy 4.1's i.MX RT1062 has USB-HS built directly
+  into the silicon, no external PHY at all, and is reliably available).
+  Phase 0 (project scaffold, compiles cleanly against a Teensy 4.1) is
+  done; proof-of-concept hardware arrives imminently, before any
+  peripheral-driving firmware gets written. The Hantek isn't going away
+  — it stays a valid option for anyone who understands its limits, and
+  its calibration/UI work carries forward regardless (the new driver
+  plugs into the same `ScopeDriver` interface with zero frontend
+  changes).
 
 ## Running the backend (mock data, no hardware needed)
 
