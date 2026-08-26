@@ -105,10 +105,27 @@ at <=0.5V, confirming HIGH=enabled/LOW=shutdown as assigned above.
 Absolute max `SHDN` voltage is VIN+0.3V and bias current is ~0-2uA, so
 GPIO25's 3.3V drive is safe directly, no level-shifter needed.
 
+## Datasheets verified (2026-08-25)
+
+All six key parts (DRV8837, TLV7031, TL331, MMBT2907ALT1G, LMR64010,
+FDN335N) checked against their real datasheets -- design confirmed
+consistent throughout, no changes needed. Full findings in
+`docs/datasheets/README.md`. Notably: TLV7031 (PWM RX) is push-pull,
+TL331 (VPW RX) is open-collector and needs the external pull-up the
+reference schematic already includes (`R197`) -- worth knowing these two
+comparators aren't interchangeable if substituting parts later. Also
+confirmed no 5V<->3.3V level shifters are needed anywhere on this board:
+DRV8837 and TLV7031 both run their logic domains from 3.3V already, TL331's
+open-collector output is pulled up to 3.3V (not 7V) via `R197`, and the
+VPW TX interface MOSFET (FDN335N, Q2) is a logic-level part that's fully
+enhanced well below 3.3V (V<sub>GS(th)</sub> max 1.5V, specified down to
+V<sub>GS</sub>=2.5V).
+
 ## Open items before ordering/building
 
 - Component sourcing: DRV8837, TLV7031, TL331, MMBT2907ALT1G, LMR64010,
-  plus supporting passives per the BOM -- not yet ordered.
+  plus supporting passives per the BOM -- datasheets in hand, parts not
+  yet ordered.
 - Firmware: port bit-timing/framing logic from OpenJ1850's STM32
   firmware and/or [voodoomods/J1850-VPW-ESP32-Interface-GM-Class2](https://github.com/voodoomods/J1850-VPW-ESP32-Interface-GM-Class2)
   (already ESP32-specific) to our firmware -- not started.
