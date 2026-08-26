@@ -24,8 +24,9 @@ constexpr int J1850_VPW_RX_PIN = 35;     // TL331 comparator output (input-only 
 // Doubles as both "which protocol is active" and "7V boost enable":
 // HIGH = VPW/GM mode (also asserts LMR64010 SHDN# high to enable the
 // +7V rail the VPW driver needs), LOW = PWM/Ford mode (boost shut down,
-// near-zero quiescent draw). Verify SHDN#'s actual active-high-vs-active-
-// low polarity against the LMR64010 datasheet before wiring/firmware
-// bring-up -- not yet confirmed against the part itself, only inferred
-// from the "SHDN#" (bar = active-low shutdown) naming convention.
+// near-zero quiescent draw). Confirmed against the LMR64010 datasheet
+// (docs/datasheets/LMR64010.pdf): SHDN device-ON threshold is >=1.5V,
+// device-OFF is <=0.5V, so HIGH=enabled/LOW=shutdown is correct; max
+// SHDN voltage is VIN+0.3V and bias current ~0-2uA, so ESP32's 3.3V
+// GPIO drives it directly, no level-shifter needed.
 constexpr int J1850_VPW_MODE_EN_PIN = 25;

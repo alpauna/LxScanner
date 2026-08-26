@@ -56,11 +56,12 @@ power difference, the mode/boost-enable design) is in
 
 PWM (OBD pins 2/10) runs on plain 5V -- no boost converter needed.
 VPW (OBD pin 2, single-wire) needs the +7V rail, only powered up in VPW
-mode via `J1850_VPW_MODE_EN`. **Not yet verified**: the LMR64010
-`SHDN#` pin's actual active-high-vs-active-low polarity against its
-datasheet -- confirm before wiring, the assignment above assumes the
-"SHDN#" naming convention (bar = active-low shutdown) but that's
-inferred, not confirmed against the part itself.
+mode via `J1850_VPW_MODE_EN`. **Verified against the LMR64010 datasheet**
+(SNVS736B): `SHDN` threshold is device ON at >=1.5V, device OFF at
+<=0.5V, so HIGH=enabled/LOW=shutdown as assigned above is correct.
+Absolute max `SHDN` voltage is VIN+0.3V and bias current is ~0-2uA, so
+driving it directly from the ESP32's 3.3V GPIO25 is safe -- no
+level-shifter or buffer needed.
 
 ## Power
 

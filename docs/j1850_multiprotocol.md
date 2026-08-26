@@ -99,11 +99,11 @@ when operating in VPW/GM mode, which the daughter board wires directly
 to the LMR64010's `SHDN#` pin, enabling the +7V rail only when VPW is
 actually in use -- shut down (near-zero quiescent draw) during PWM/Ford
 operation, which is the common case given the F150 is the primary
-target. **Not yet verified**: `SHDN#`'s actual active-high-vs-active-low
-polarity against the LMR64010 datasheet -- the "SHDN#" naming (bar =
-active-low shutdown) implies HIGH=enabled/LOW=shutdown, which is what
-the pin assignment above assumes, but confirm against the datasheet
-before wiring, not just the naming convention.
+target. **Verified against the LMR64010 datasheet** (SNVS736B, see
+`docs/datasheets/`): `SHDN` threshold is device ON at >=1.5V, device OFF
+at <=0.5V, confirming HIGH=enabled/LOW=shutdown as assigned above.
+Absolute max `SHDN` voltage is VIN+0.3V and bias current is ~0-2uA, so
+GPIO25's 3.3V drive is safe directly, no level-shifter needed.
 
 ## Open items before ordering/building
 
