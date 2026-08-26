@@ -77,12 +77,36 @@ quiescent draw) during PWM-only operation -- which is the common case
 given the F150 is the primary target. Reuses infrastructure already in
 the reference design rather than adding a separate switch.
 
+## ESP32 pin assignments (confirmed, in `firmware/include/pins.h`)
+
+Physically a separate daughter board (like the CAN transceiver module
+already ordered), short wires to the ESP32, same pattern. Picked to
+avoid GPIO0/2/12/15 (strapping pins), GPIO6-11 (internal flash, never
+usable), GPIO1/3 (UART0/programming), and the existing CAN pins (4, 5):
+
+| Signal | ESP32 pin | Notes |
+|---|---|---|
+| `J1850_PWM_TX_P` | GPIO13 | DRV8837 IN1 -> OUT1 -> OBD pin 2 |
+| `J1850_PWM_TX_N` | GPIO14 | DRV8837 IN2 -> OUT2 -> OBD pin 10 |
+| `J1850_PWM_TX_EN` | GPIO27 | DRV8837 nSLEEP: LOW=Hi-Z/RX-only, HIGH=driver enabled |
+| `J1850_PWM_RX` | GPIO34 | TLV7031 comparator output (input-only pin, fine for RX) |
+| `J1850_VPW_TX` | GPIO26 | to VPW driver transistor (via its bias network) |
+| `J1850_VPW_RX` | GPIO35 | TL331 comparator output (input-only pin, fine for RX) |
+| `J1850_VPW_MODE_EN` | GPIO25 | **both** "VPW mode active" and "7V boost enable" -- see below |
+
+`J1850_VPW_MODE_EN` does double duty by design: firmware drives it HIGH
+when operating in VPW/GM mode, which the daughter board wires directly
+to the LMR64010's `SHDN#` pin, enabling the +7V rail only when VPW is
+actually in use -- shut down (near-zero quiescent draw) during PWM/Ford
+operation, which is the common case given the F150 is the primary
+target. **Not yet verified**: `SHDN#`'s actual active-high-vs-active-low
+polarity against the LMR64010 datasheet -- the "SHDN#" naming (bar =
+active-low shutdown) implies HIGH=enabled/LOW=shutdown, which is what
+the pin assignment above assumes, but confirm against the datasheet
+before wiring, not just the naming convention.
+
 ## Open items before ordering/building
 
-- ESP32 GPIO pin assignments for: PWM TX_P, TX_N, TX_EN; PWM RX; VPW TX;
-  VPW RX; boost `SHDN#` control -- TBD, to be added to
-  `firmware/include/pins.h` once decided (avoid conflicts with the
-  existing CAN TX/RX pins from `docs/wiring.md`).
 - Component sourcing: DRV8837, TLV7031, TL331, MMBT2907ALT1G, LMR64010,
   plus supporting passives per the BOM -- not yet ordered.
 - Firmware: port bit-timing/framing logic from OpenJ1850's STM32

@@ -37,6 +37,31 @@ connected to a real vehicle -- the bus is already terminated at both ends
 inside the car. Only add one for bench testing with a bare transceiver pair
 and no live vehicle bus.
 
+## J1850 (PWM + VPW) daughter board
+
+Second small board, short wires to the ESP32, same pattern as the CAN
+transceiver above. Full circuit rationale (why these ICs, the PWM/VPW
+power difference, the mode/boost-enable design) is in
+`docs/j1850_multiprotocol.md` -- this is just the pin reference:
+
+| Signal | ESP32 pin | Notes |
+|---|---|---|
+| `J1850_PWM_TX_P` | GPIO13 | DRV8837 IN1 -> OUT1 -> OBD pin 2 |
+| `J1850_PWM_TX_N` | GPIO14 | DRV8837 IN2 -> OUT2 -> OBD pin 10 |
+| `J1850_PWM_TX_EN` | GPIO27 | DRV8837 nSLEEP: LOW=Hi-Z/RX-only, HIGH=driver enabled |
+| `J1850_PWM_RX` | GPIO34 | TLV7031 comparator output (input-only pin) |
+| `J1850_VPW_TX` | GPIO26 | to VPW driver transistor (via its bias network) |
+| `J1850_VPW_RX` | GPIO35 | TL331 comparator output (input-only pin) |
+| `J1850_VPW_MODE_EN` | GPIO25 | HIGH = VPW mode + enables the +7V boost (LMR64010 `SHDN#`); LOW = PWM mode, boost shut down |
+
+PWM (OBD pins 2/10) runs on plain 5V -- no boost converter needed.
+VPW (OBD pin 2, single-wire) needs the +7V rail, only powered up in VPW
+mode via `J1850_VPW_MODE_EN`. **Not yet verified**: the LMR64010
+`SHDN#` pin's actual active-high-vs-active-low polarity against its
+datasheet -- confirm before wiring, the assignment above assumes the
+"SHDN#" naming convention (bar = active-low shutdown) but that's
+inferred, not confirmed against the part itself.
+
 ## Power
 
 Pin 16 is nominally 12V but noisy and dips hard (down to ~6V) during
@@ -55,6 +80,9 @@ directly into the ESP32's 3.3V or 5V pins.
 - ESP32 DevKitC (WROOM-32) -- ~$6–10
 - SN65HVD230 CAN transceiver breakout -- ~$2–3
 - OBD2 pigtail/breakout cable -- ordered
+- J1850 daughter board components (not yet ordered): DRV8837, TLV7031,
+  TL331, MMBT2907ALT1G, LMR64010, plus supporting passives -- see
+  `docs/j1850_multiprotocol.md` for the full circuit and BOM reference
 - (later, in-car) 12V→5V buck converter module
 
 ## Known firmware limitations (v1)
