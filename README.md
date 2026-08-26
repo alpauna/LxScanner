@@ -47,7 +47,7 @@ backend/         FastAPI app: ingest, decoding, session recording, WebSocket hub
 frontend/        React + Vite dashboard
 firmware/        ESP32 (PlatformIO) firmware: TWAI CAN + OBD-II + WiFi uplink
 firmware-teensy/ Teensy 4.1 (PlatformIO) firmware: custom multi-channel DAQ, see docs/teensy_daq.md
-docs/            Wiring/power notes, Hantek 1008C driver notes, Teensy DAQ design
+docs/            Wiring/power notes, Hantek 1008C driver notes, Teensy DAQ design, J1850 plan
 ```
 
 ## Status
@@ -98,6 +98,13 @@ docs/            Wiring/power notes, Hantek 1008C driver notes, Teensy DAQ desig
   its calibration/UI work carries forward regardless (the new driver
   plugs into the same `ScopeDriver` interface with zero frontend
   changes).
+- **J1850 (PWM + VPW) legacy bus support**: planned, targeting a 2001
+  Ford F150 (J1850 PWM) plus GM coverage (J1850 VPW), integrated into
+  the ESP32 rather than as a separate device. Full design in
+  `docs/j1850_multiprotocol.md`, adapting the transceiver circuits from
+  [OpenJ1850](https://github.com/egtechgeek/OpenJ1850) (MIT licensed).
+  Components not yet ordered — no peripheral-driving firmware written
+  yet, same discipline as the other hardware efforts here.
 
 ## Running the backend (mock data, no hardware needed)
 
