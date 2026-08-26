@@ -41,8 +41,17 @@ and no live vehicle bus.
 
 Second small board, short wires to the ESP32, same pattern as the CAN
 transceiver above. Full circuit rationale (why these ICs, the PWM/VPW
-power difference, the mode/boost-enable design) is in
-`docs/j1850_multiprotocol.md` -- this is just the pin reference:
+power difference, the mode/boost-enable design, the RX protection
+networks) is in `docs/j1850_multiprotocol.md` -- this is just the pin
+reference.
+
+The daughter board itself uses **three separate physical connectors**
+rather than one combined header: `POWER` (3.3V/5V/7V/GND only), `ESP32`
+(logic-level signals only, nothing above 3.3V), and `OBD2` (the raw
+vehicle-bus-facing pins). This keeps power rails from ever sitting on
+the same connector as a 3.6V-rated logic pin -- see
+`docs/j1850_multiprotocol.md`'s "Connector architecture" section for
+why. The GPIO table below covers the `ESP32` connector's signals:
 
 | Signal | ESP32 pin | Notes |
 |---|---|---|
@@ -82,8 +91,13 @@ directly into the ESP32's 3.3V or 5V pins.
 - SN65HVD230 CAN transceiver breakout -- ~$2–3
 - OBD2 pigtail/breakout cable -- ordered
 - J1850 daughter board components (not yet ordered): DRV8837, TLV7031,
-  TL331, MMBT2907ALT1G, LMR64010, plus supporting passives -- see
-  `docs/j1850_multiprotocol.md` for the full circuit and BOM reference
+  TL331, LMR64010, AP2003 (VPW TX, replaces the earlier discrete
+  FDN335N + MMBT2907ALT1G pair), SMF12A + PMEG4010ESBYL (VPW RX
+  protection), MM3Z3V3BW x2 + SMF3.3 x2 + SMAJ5.0A (PWM RX / rail
+  protection -- three parts still pending datasheet verification), plus
+  supporting passives -- see `docs/j1850_multiprotocol.md` and
+  `docs/datasheets/README.md` for the full circuit, verification status,
+  and BOM reference
 - (later, in-car) 12V→5V buck converter module
 
 ## Known firmware limitations (v1)
