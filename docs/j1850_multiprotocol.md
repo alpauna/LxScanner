@@ -302,6 +302,78 @@ pair, consolidated into AP2003) and SMAJ5.0A (briefly on the +5V rail
 clamp, swapped for SMF5.0A to keep the rail-protection TVS family
 consistent). Datasheets kept in `docs/datasheets/` for reference.
 
+## Fallback option: MC33390 single-chip VPW transceiver
+
+Not being used -- noted for posterity in case the discrete VPW circuit
+above doesn't pan out on the bench, and relevant again for a **future
+Chevy/GM target** (VPW-only, separate from the current F150/PWM focus).
+
+The MC33390 (Freescale/onsemi, "Class B Serial Transceiver", found
+available on eBay) is a purpose-built SAE J1850 Class B (VPW, 10.4kbps)
+transceiver that would replace essentially the entire discrete VPW
+stack -- AP2003's P-channel drive, TL331, the PMEG4010ESBYL/SMF12A
+protection network, and even the LMR64010 7V boost converter, since it
+runs directly off the vehicle's 9-16V battery rail (40V max rating)
+rather than needing a regulated 7V supply. 8-pin SOIC, minimal external
+circuitry, on-die short-circuit/thermal-shutdown/loss-of-ground
+protection and output waveshaping.
+
+**Related reference, also VPW/GM-focused**: [garnerm91/J1850](https://github.com/garnerm91/J1850)
+-- an Arduino-based J1850VPW module built around the **Motorola/Freescale
+XC68HC58** datalink IC (a different single-chip VPW transceiver than
+MC33390), with a boost converter (~100mA @14V) on board. Three hardware
+revisions (Rev C currently sold on the author's eBay, KiCAD gerbers/
+schematics/BOM in the repo), plus example Arduino sketches for TX/RX
+over SPI. VPW only, same as MC33390 -- doesn't touch the PWM/F150 side.
+**License not specified in the README** -- unlike OpenJ1850 (confirmed
+MIT via the GitHub API), don't treat this as reusable without checking
+further first.
+
+**Will need a level shifter**: its logic I/O is referenced as "5.0V
+CMOS" -- confirmed abs-max input range is -0.3V to 7.0V, but the actual
+V<sub>IH</sub>/V<sub>IL</sub> switching thresholds (not yet pulled from
+the full datasheet) determine whether the ESP32's 3.3V GPIOs could
+drive `TX`/`SLEEP`/`4X-LOOP` directly -- assume a level shifter is
+needed until proven otherwise, unlike every part in the current design,
+which was specifically chosen to avoid that. Also note: reverse-battery
+protection isn't on-die (datasheet requires an external series diode
+for that), and this part is VPW-only -- doesn't touch the PWM/F150 side
+at all. Datasheet on file: `docs/datasheets/MC33390.pdf`.
+
+## Broader reference: AllPro (antuspcm/allpro)
+
+[antuspcm/allpro](https://github.com/antuspcm/allpro) -- confirmed via
+the GitHub API (description, language, no `license` field detected).
+Genuinely more general than the VPW-only references above: a mature,
+open-source **ELM327-compatible** OBD-II adapter supporting **J1850
+PWM *and* VPW**, ISO 9141-2, ISO 14230-4 (KWP2000), and ISO 15765-4
+(CAN) -- i.e. covers all the legacy protocols researched earlier in
+this doc's history, not just VPW/GM. Built around an NXP LPC1517
+Cortex-M3 (C firmware, prebuilt hex files available). Has a
+`4xj1850` branch specifically for 4x-speed J1850 at 128-byte packets,
+per pcmhacking.net forum discussion of the project.
+
+Relevant to **both** the current F150/PWM work and the future GM/VPW
+phase, unlike the MC33390/garnerm91/fastfieros references above, which
+are VPW-only. Worth treating as a firmware-architecture reference once
+bit-timing/framing work starts on real hardware. **No license
+detected** by GitHub (same caution as garnerm91/J1850) -- confirm
+licensing before reusing any code directly.
+
+## Application-layer protocol reference (for later firmware work)
+
+[fastfieros.com: VPW Communication Protocol](https://www.fastfieros.com/tech/vpw_communication_protocol.htm)
+-- despite the generic-sounding title, this is a **VPW/GM-focused**
+application-layer reference (message header format, physical/functional
+addressing, PCM mode bytes, response codes, a 100+ entry PID list, worked
+message examples), not a Ford/PWM document -- it only mentions Ford once,
+as a one-field comparison point (`In Frame Response`: required on Ford,
+not allowed on GM). **No physical-layer content** (no bit timing,
+voltage levels, or signal encoding) -- won't help with the transceiver
+hardware or firmware bit-timing, only with framing/PIDs once that layer
+exists. Filed here since it's relevant to VPW/GM firmware work
+specifically, same phase as the MC33390/garnerm91 fallback notes above.
+
 ## Open items before ordering/building
 
 - Component sourcing: full updated BOM (AP2003, MM3Z3V3BW x2, SMF3.3
@@ -315,7 +387,9 @@ consistent). Datasheets kept in `docs/datasheets/` for reference.
   that schematic's available.
 - Firmware: port bit-timing/framing logic from OpenJ1850's STM32
   firmware and/or [voodoomods/J1850-VPW-ESP32-Interface-GM-Class2](https://github.com/voodoomods/J1850-VPW-ESP32-Interface-GM-Class2)
-  (already ESP32-specific) to our firmware -- not started.
+  (already ESP32-specific) to our firmware -- not started. See also the
+  fastfieros VPW application-layer reference above for GM PID/framing
+  details once that work starts.
 
 ## Ground rule (same as the Teensy DAQ)
 
