@@ -152,6 +152,31 @@ host wants to buffer/record," not a fixed onboard limit.
     at a time.
 
 ### Phase 1 (once the board arrives -- bring-up, bench-validated)
+- **Firmware written 2026-08-27** (`firmware-teensy/src/main.cpp`,
+  compiles clean via `pio run`): full reset sequence, `CONVST` pulse +
+  `BUSY` poll with timeout, 8-channel read via CS-framed 16-bit SPI
+  transfers on `DOUTA` (hardware mode, matching the datasheet's
+  confirmation that all 8 channels are readable this way), raw-to-volts
+  conversion for the +/-5V range, Serial print at a human-readable rate.
+  Internal 2.5V reference for this run (REF SELECT as-shipped, per the
+  earlier decision to keep that a separate, later change).
+  **Bench-validated 2026-08-27** -- flashed and running on real
+  hardware. No `BUSY` timeout or `FRSTDATA` misalignment on any read
+  (CONVST/BUSY timing confirmed matching the datasheet), all 8 channels
+  return distinct values each frame (confirms the CS-framed 8-channel
+  read logic is actually capturing 8 separate conversions, not
+  re-reading one channel), and readings are smooth/low-noise rather
+  than garbled -- `SPI_MODE1` guess appears correct. All 8 channels
+  currently read ~3.52-3.53V with tight, correlated clustering -- as
+  expected for floating 1MΩ inputs with no test signal connected yet
+  (not a fault). Next: connect a known test signal (the 2V/1kHz square
+  wave or 24VAC transformer already used for Hantek validation) to
+  confirm the ADC tracks a real signal correctly.
+
+  Upload note: this dev machine was missing the PJRC `00-teensy.rules`
+  udev rule, which blocked the automatic USB-based bootloader trigger --
+  installed it, then needed a physical USB replug before uploads worked
+  without pressing the board's program button each time.
 - Basic SPI comms Teensy <-> AD7606: single-channel single-shot
   conversion, confirm CONVST/BUSY timing matches the datasheet.
 - Multi-channel simultaneous sampling at a modest rate.
