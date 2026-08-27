@@ -109,6 +109,47 @@ host wants to buffer/record," not a fixed onboard limit.
   interface, 3.3V control-signal level -- confirmed from the product's
   manual: pins include AD_SPI_SCK/MISO/CS/RESET/CONVST/RANGE and
   oversample select AD_OS0-2).
+- **Wired 2026-08-27** (AD7606C-16 breakout -> Teensy 4.1), 1-DOUTA-line
+  hardware-mode serial config per the datasheet's own confirmation that
+  all 8 channels can still be read this way ("all channels can be read
+  from DOUTA by providing eight 16-bit SPI frames between two CONVST
+  pulses"):
+
+  | AD7606C-16 pin | Function | Teensy 4.1 |
+  |---|---|---|
+  | 12, `RD/SCLK` | SCLK | 13 (`SPI0 SCK`, shares the onboard LED pin -- cosmetic flicker only) |
+  | 24, `DB7/DOUTA` | Serial data out, all 8 channels | 12 (`SPI0 MISO`) |
+  | 9/10, `CONVST`/`WR` | Conversion start (breakout ties these together on-board, matching the datasheet's own suggested WR-to-CONVST strap) | 14 |
+  | 11, `RESET` | Reset | 15 |
+  | 13, `CS` | Frames each 16-bit read (software-controlled, not hardware SPI CS -- needed to frame 8 individual reads per burst) | 16 |
+  | 14, `BUSY` | High during conversion | 17 |
+  | 15, `FRSTDATA` | Flags first-channel data on DOUTA | 18 |
+  | 3-5, `OS0`-`OS2` | Oversampling select (wired to GPIOs rather than hardwired, for runtime flexibility) | 19, 20, 21 |
+  | 8, `RANGE` | Input range select | 22 |
+
+  Not used: Teensy `MOSI` -- nothing to write to the ADC in hardware
+  mode, `SDI` stays hardwired high on the breakout.
+
+  **Static-strap investigation** -- three pins (`PAR/SER SEL` pin 6,
+  `STBY` pin 7, `V_DRIVE` pin 23) aren't broken out to the breakout's
+  header, initially assumed to need bodge wires soldered directly to
+  the fine-pitch LQFP package. Checked each with continuity + powered
+  voltage measurement before doing that -- **all three turned out to
+  already be correctly configured on-board, zero bodge wires needed**:
+  - `V_DRIVE` and `STBY`: both already tied to the board's onboard 3.3V
+    LDO.
+  - `PAR/SER SEL`: initially read as floating on a continuity-beep
+    check (most multimeters only beep under ~50-150ohm), but a proper
+    resistance measurement found it's pulled to 3.3V via a populated
+    10k resistor, R1. There's an unpopulated R2 pad right next to it --
+    same pull-up/pull-down-pair pattern as `REF SELECT`'s R5/R8 (see
+    the reference section above). Not needed now, but if parallel mode
+    is ever wanted later, desolder R1 and populate R2 in its place.
+  - For this first bring-up run, `REF SELECT` stays as-shipped (R5 in
+    place, internal 2.5V reference) -- the R5->R8 swap to the external
+    ADR4525 reference is a deliberately separate, later change, kept
+    isolated from this digital bring-up so only one variable changes
+    at a time.
 
 ### Phase 1 (once the board arrives -- bring-up, bench-validated)
 - Basic SPI comms Teensy <-> AD7606: single-channel single-shot
