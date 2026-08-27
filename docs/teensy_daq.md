@@ -137,12 +137,125 @@ host wants to buffer/record," not a fixed onboard limit.
   multi-point DC calibration design instead. Revisit an onboard
   reference generator later if convenient.
 
+## ADC choice: bench test on AD7606C-16, switch to AD7606C-18 for the final PCB
+
+Both datasheet-verified in full (`docs/datasheets/AD7606C-16.pdf`,
+findings for AD7606C-18 captured in this doc since that PDF isn't kept
+on file -- it was never the part actually ordered, just briefly
+mis-identified). **Pin-for-pin identical**: same 64-lead LQFP package,
+same pin assignments (`REF SELECT` pin 34, `REFIN/REFOUT` pin 42, same
+analog input pins, same absolute max ratings, same ±21V analog input
+clamp behavior, same reference/decoupling requirements) -- confirmed by
+direct side-by-side comparison of both datasheets' pin configuration
+and absolute maximum ratings tables.
+
+**Bench/bring-up board**: AD7606C-16 -- already ordered and in hand
+(the Teyleten breakout, see Phase 0 above).
+
+**Final PCB**: AD7606C-18 instead, once layout moves past the
+proof-of-concept stage. Reasoning, fully verified rather than assumed:
+- **No speed penalty** -- both parts share the same 1 MSPS headline
+  rate; confirmed from the AD7606C-16 timing table directly
+  (t<sub>CYCLE</sub> min = 1us, matching 1 MSPS exactly). This is a SAR
+  architecture, not one where resolution and throughput trade off
+  within the family the way they do on delta-sigma parts (see the
+  LTC2445 rejection below) -- 18-bit costs nothing in speed here.
+- **4x finer resolution** for the same input range (e.g., ±5V range:
+  152.58uV/LSB at 16-bit vs. 38.1uV/LSB at 18-bit) -- directly useful
+  for this project's original motivation (resolving both large and
+  subtle signal content in the same capture).
+- **Modest, not dramatic, SNR gain**: 93dB (18-bit) vs. 92dB (16-bit)
+  on the ±20V differential range -- only 1dB apart, meaning the real
+  noise floor (front-end/reference, not pure quantization) is nearly
+  identical between the two; the extra resolution mainly buys more
+  digital codes below that same noise floor.
+- **Zero layout or firmware cost** -- pin-for-pin identical as noted
+  above, and same SPI/parallel interface and timing, so everything
+  built against the AD7606C-16 (reference network, input protection
+  stages, SPI bring-up firmware) carries forward unchanged.
+- **Equal price as of 2026-08-26** ($53.12 each) -- no cost trade-off
+  either, at least at the time of checking.
+
+**Considered and rejected**: LTC2445 (24-bit, $21.60, cheaper and
+higher nominal resolution) -- disqualified on architecture, not price.
+It's a multiplexed delta-sigma ADC (all channels scanned sequentially
+through one converter via an internal MUX), not simultaneous-sampling
+SAR like the AD7606 family -- there is no moment where all 8 channels
+are captured at once regardless of speed setting, which matters for
+correlating timing between channels (e.g., ignition coil vs. crank/cam
+signal). Its own datasheet states all 8 differential channels scan at
+just 500Hz in 1x mode, and its noise-vs-speed table shows genuinely
+low-noise operation (200nV<sub>RMS</sub>) requires dropping to 13.8Hz
+per channel -- 4-5 orders of magnitude slower than the AD7606 family's
+1 MSPS simultaneous, in the regime where its extra resolution would
+matter. Its own Applications list (weigh scales, thermocouples, DVMs,
+direct temperature measurement) confirms it's built for slow/DC
+precision measurement, not transient capture -- the wrong category of
+part for resolving kHz-range ignition/injector edges, the actual reason
+this custom DAQ exists.
+
 ### Phase 3 (scale up)
 - All 8 channels, real automotive bench testing (ignition, injector,
   wideband O2 -- the actual wide-timescale signals that motivated this).
 - Only after the dev-board proof-of-concept validates the core
   architecture: custom PCB design (proper per-channel analog front-end,
   connectors, enclosure).
+- **AD7606C-16 layout guidelines** (confirmed from the datasheet's own
+  Layout Guidelines section, relevant to the custom PCB): split
+  analog/digital ground planes joined in exactly one place, as close as
+  possible to the ADC -- matches the plan already decided for the final
+  board (single tie-in right next to the ADC). Also: run the analog
+  ground plane under the AD7606C-16 itself (no digital lines
+  underneath), shield fast-switching signals like `CONVST`/clocks with
+  digital ground and keep them away from analog paths entirely (no
+  digital/analog crossovers), and place `REFIN/REFOUT`/`REFCAPA`/
+  `REFCAPB` decoupling caps as close as possible to their respective
+  pins, ideally on the same board side as the ADC.
+- **External 2.5V reference** (bring-up board, not yet the final PCB):
+  swapping the AD7606C-16's internal reference for an external
+  **ADR4525** (2.500V exact match, ±0.02% initial accuracy, down to
+  0.8ppm/°C -- datasheet-verified, see `docs/datasheets/ADR4525.pdf`)
+  via a small daughter board + 3 short flying wires (5V, GND, filtered
+  V<sub>OUT</sub>). Requires flipping `REF SELECT` (pin 34) from its
+  as-shipped high strap (internal reference) to GND (external
+  reference) -- without that, the internal reference stays active and
+  the external one has no effect. Daughter board carries a full π
+  filter (1µF -- ferrite bead ~10Ω@100MHz -- 1µF) on the reference
+  output before the flying wire, satisfying both ADR4525's own required
+  output-stability cap and general noise filtering in one design. The
+  AD7606C-16's own required decoupling (100nF at `REFIN/REFOUT`, 10µF
+  at `REFCAPA`/`REFCAPB`, the latter already present on the breakout
+  and confirmed present via measurement) stays regardless of reference
+  source.
+- **Analog input protection** (bring-up board): the AD7606C-16 has
+  built-in clamp protection per channel (transparent up to ±21V, clamps
+  above that) and its datasheet explicitly recommends an external
+  series resistor -- matched on both Vx+ and Vx- -- to hold fault
+  current under the ±10mA absolute max for inputs beyond ±21V. That's
+  sufficient for ESD-class events but not for genuine inductive
+  discharge (e.g. accidentally probing an ignition coil or injector) --
+  the on-chip clamp alone has no dedicated energy-absorbing element.
+  Designed a 3-stage cascaded network per channel, cost not a
+  constraint, targeting real coil-class transients (order of a few
+  hundred volts, not just ESD-level):
+  1. **SMCJ-class bidirectional TVS** at the input connector (~33-36V
+     standoff -- clear of the ADC's full native ±20V range -- 1500W
+     peak-pulse-power class) absorbs the bulk of a real transient's
+     energy before it reaches anything else.
+  2. **6.8kΩ series resistor, 1210 case size, matched on both legs**
+     (per the datasheet's own offset-matching recommendation) -- limits
+     current into the chip's internal clamp with real margin (~5mA
+     headroom under the residual voltage past Stage 1), while staying
+     small enough to keep 1MΩ input-impedance loading and Johnson-noise
+     contribution negligible. Larger case size than a standard 1206 for
+     better pulse-energy survivability of the resistor itself.
+  3. **SMA-style bidirectional TVS** (~24V standoff) right at the ADC
+     pin as a fast, low-capacitance backup to the chip's own internal
+     clamp -- coordinated cascaded protection, the same philosophy used
+     in real bench-instrument (scope/DMM) input protection.
+  Component datasheets for this network not yet obtained -- verify
+  clamping voltage, response time, and capacitance against this design
+  once specific part numbers are picked.
 
 ## Future consideration: Ethernet instead of/alongside USB
 
