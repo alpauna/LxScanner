@@ -6,13 +6,13 @@
  * frames between two CONVST pulses"). Wiring matches
  * docs/teensy_daq.md's Phase 0 wiring table exactly.
  *
- * SPI mode is a best-informed guess from the datasheet's serial
- * timing diagram (Figure 6: data access time is specified *after*
- * each SCLK rising edge, which puts the safe sampling point on the
- * following falling edge -- CPHA=1). This is the first thing to
- * verify against real hardware: if channel values look garbled or
- * bit-shifted rather than just noisy, try the other SPI modes before
- * assuming anything else is wrong.
+ * SPI mode: CONFIRMED SPI_MODE0 against a known +/-1.24V reference
+ * signal (2026-08-27) -- reads +1.165V/-1.197V, within a few percent
+ * of true (expected without offset/gain calibration). The original
+ * SPI_MODE1 guess gave a consistent ~1.9-2x scaling error -- a wrong
+ * CPHA shifts every sampled bit by one clock edge, which is
+ * mathematically a x2/div2 error, matching exactly what was observed
+ * (smooth, stable, repeatable, but wrong -- not random garbage).
  */
 #include <Arduino.h>
 #include <SPI.h>
@@ -49,7 +49,7 @@ constexpr uint32_t RESET_SETTLE_US = 400;
 // confirmed clean.
 constexpr uint32_t SPI_CLOCK_HZ = 1'000'000;
 
-SPISettings spiSettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE1);
+SPISettings spiSettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0);
 
 void pulseConvst() {
   digitalWriteFast(PIN_CONVST, LOW);

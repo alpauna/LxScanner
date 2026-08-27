@@ -177,6 +177,24 @@ host wants to buffer/record," not a fixed onboard limit.
   udev rule, which blocked the automatic USB-based bootloader trigger --
   installed it, then needed a physical USB replug before uploads worked
   without pressing the board's program button each time.
+
+  **SPI mode confirmed against a real signal (2026-08-27)**: connected
+  a known +/-1.24V, 1kHz signal (verified independently on an
+  oscilloscope, and directly at AD7606 pin 49/V1+, ruling out a wiring
+  problem) to Channel 1. Initial reading with the `SPI_MODE1` guess was
+  a consistent ~1.9-2x too high (e.g. +2.35V/-2.39V for a true
+  +-1.24V signal) -- systematically ruled out RANGE pin instability
+  (confirmed steady 0V) and the LSB constant (confirmed correct against
+  Table 11) before concluding the SPI mode guess itself was wrong. A
+  wrong CPHA shifts every sampled bit by one clock edge, which is
+  mathematically a x2 error -- matches exactly what was observed
+  (smooth, stable, repeatable, but wrong, not random garbage).
+  Switched to `SPI_MODE0` (matches a closer reading of Figure 6: the
+  MSB is already valid on DOUTA right as CS falls, before the first
+  clock pulse, pointing to leading-edge sampling) -- now reads
+  +1.165V/-1.197V against the true +/-1.24V signal, within a few
+  percent as expected pre-calibration. SPI mode is now confirmed, not
+  a guess.
 - Basic SPI comms Teensy <-> AD7606: single-channel single-shot
   conversion, confirm CONVST/BUSY timing matches the datasheet.
 - Multi-channel simultaneous sampling at a modest rate.
