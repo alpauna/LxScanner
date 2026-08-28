@@ -340,6 +340,48 @@ this custom DAQ exists.
   Component datasheets for this network not yet obtained -- verify
   clamping voltage, response time, and capacitance against this design
   once specific part numbers are picked.
+- **Precision 0-2.5V square-wave test signal generator** (designed
+  2026-08-28, not yet built): a self-built, reference-accurate 1kHz/50%
+  duty cycle test signal, extending the same "validate against known
+  references" discipline used for the Hantek work to a signal the
+  project generates itself rather than borrows.
+  - **Dedicated, isolated 2.5V reference module**: its own ADR4525 +
+    regulator + ferrite-bead filter, physically and electrically
+    separate from the ADR4525 feeding the AD7606's `REFIN` -- so the
+    generator's own switching transients never reach the ADC's actual
+    measurement reference. Confirmed as the right call rather than
+    sharing/buffering off the same reference.
+  - **Switching mechanism**: a single N-channel MOSFET (`JTD2302`, see
+    above) pulls the LMV721 buffer's `+` input to GND through a 100kΩ
+    series resistor (`R4`), driven directly by a Teensy GPIO at 1kHz.
+    Considered and rejected first: reusing the AP2003-style
+    complementary-pair switch *after* the buffer (would fight the
+    op-amp's own active output -- sustained contention, imprecise low
+    level, wasted power); using an op-amp's own enable/shutdown pin as
+    the switch (LMV721N's disabled-output behavior is undocumented in
+    its datasheet -- likely high-Z, would leave the "off" state
+    floating rather than a clean 0V, and its turn-on/turn-off timing is
+    asymmetric enough to distort the duty cycle even if it did work).
+  - **Why R4=100k doesn't hurt accuracy despite being a resistor
+    divider** (initially flagged as a repeat of the R15/PWM-RX-bias bug
+    from the J1850 board, then corrected once the actual values were
+    checked): the R15 bug involved two *comparable* impedances (100k
+    against 100k, ~50/50 divider, large error). Here R4 sits against
+    two very different, both heavily lopsided loads -- the op-amp's
+    ~1pA input bias current when the switch is off (voltage drop
+    ~100fV, i.e. nothing), and the MOSFET's few-ohm-to-49mΩ
+    R<sub>DS(ON)</sub> when the switch is on (divider ratio ~7x10<sup>-5</sup>,
+    landing within a few hundred µV of true 0V). R4's own tolerance
+    barely matters in either state. The real accuracy floor ends up
+    being the LMV721's own offset voltage (0.8mV typ/3.5mV max), not
+    the divider.
+  - **Buffer**: LMV721 in unity-gain follower, output through a 150Ω
+    series resistor sized against LMV721's own 38mA min output current
+    rating (full temp range) to bound any transient current, negligible
+    against the µA-level load this only ever drives (AD7606 input,
+    maybe a scope probe).
+  - Not yet built or bench-validated -- next step once parts are in
+    hand.
 
 ## Future consideration: Ethernet instead of/alongside USB
 
