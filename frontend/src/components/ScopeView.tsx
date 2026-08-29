@@ -592,13 +592,34 @@ export function ScopeView() {
   async function applyTimePerDiv(v: number) {
     setTimebaseBusy(true);
     try {
-      // The Teensy DAQ has no hardware capture-window RPC (see
-      // TIME_PER_DIV_OPTIONS_BY_SOURCE above) -- Time/div there is a pure
-      // display zoom, so skip the backend call entirely for it.
-      if (scopeSource !== "teensy") {
+      if (scopeSource === "teensy") {
+        // The Teensy DAQ has no hardware capture-window RPC (see
+        // TIME_PER_DIV_OPTIONS_BY_SOURCE above) -- every frame is a fixed
+        // ~2.8ms window, so `zoomRange.x = null` (auto-fit to live data)
+        // always recomputes to the same span no matter what's selected.
+        // Do a real display zoom into the currently buffered frame
+        // instead, same as applyVoltsPerDiv's y-zoom below. Freezing
+        // matters here: the x buffer holds absolute batch timestamps that
+        // keep advancing as new frames replace it, so an absolute zoom
+        // range only stays valid once nothing new is being rendered.
+        //
+        // Center on xBufferRef directly, not the plot's own rendered
+        // scale (getCurrentXRange/liveXRange) -- those only update once
+        // per animation frame, and rAF can lag arbitrarily (throttled
+        // background tabs measured 10+ seconds behind here) while
+        // xBufferRef is written synchronously by the WebSocket handler
+        // the instant a batch arrives, independent of rendering.
+        setFrozen(true);
+        const buf = xBufferRef.current;
+        const min = buf[0] ?? 0;
+        const max = buf[buf.length - 1] ?? min + 1;
+        const center = (min + max) / 2;
+        const half = (v * DIVS_X) / 2;
+        setZoomRange((z) => ({ ...z, x: [center - half, center + half] }));
+      } else {
         await setTimebase(Math.round(v * 1e9));
+        setZoomRange((z) => ({ ...z, x: null })); // stale relative to the new window
       }
-      setZoomRange((z) => ({ ...z, x: null })); // stale relative to the new window
     } finally {
       setTimebaseBusy(false);
     }
