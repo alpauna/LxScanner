@@ -55,12 +55,18 @@ const DIVS_Y = 8;
 // however much is loaded, so very large values may feel janky.
 const HISTORY_SECONDS_OPTIONS = [1, 2, 5, 10, 20];
 const DEFAULT_HISTORY_SECONDS = 5;
-// Threshold to distinguish a real dead-time gap (Hantek bursts have
-// ~tens-to-hundreds of ms of real USB-overhead dead time between them)
-// from normal streaming cadence (Teensy's ~22us/sample, Mock's exact
-// zero gap by construction) -- comfortably above the latter, comfortably
-// below the former.
-const GAP_THRESHOLD_SEC = 0.005;
+// Gap threshold is relative to each batch's own dt, not a fixed constant
+// -- a fixed threshold that comfortably clears Hantek's ~tens-to-hundreds
+// of ms of real inter-burst dead time is not automatically small enough
+// for Teensy: its backend queue drops the oldest frame under backpressure
+// (see teensydaq/driver.py's _enqueue), and a single dropped frame is
+// only ~2.8ms (128 samples x ~22us) -- comfortably *under* a 5ms fixed
+// threshold, so it would render as a smeared diagonal instead of a gap.
+// A small multiple of the batch's own dt scales correctly for every
+// source: tiny for Teensy (so it actually catches a dropped frame) while
+// still trivially far below Hantek's real dead time (whose own dt is
+// similarly small).
+const GAP_THRESHOLD_DT_MULTIPLIER = 3;
 const SCOPE_SOURCE_LABELS: Record<string, string> = {
   mock: "Mock",
   hantek: "Hantek 1008C",
@@ -320,6 +326,19 @@ export function ScopeView() {
       .then((info) => {
         setScopeSourceState(info.active);
         setAvailableSources(info.available);
+        // The initial timePerDivSec (0.001) isn't a valid option for
+        // every source's list (Teensy's tops out at 500us) -- applySource
+        // clamps on an explicit switch, but this passive mount-time fetch
+        // needs the same treatment for whatever source the backend
+        // already happened to be on. Found via a real repro: with
+        // 0.001 outside Teensy's option list, the <select> silently fell
+        // back to displaying its first option while the actual
+        // timePerDivSec state stayed stuck at 0.001 -- so the dropdown
+        // read "10 us/div" while the rendered window was really 10ms
+        // wide (0.001 * DIVS_X), a visible, confusing desync.
+        setTimePerDivSec((prev) =>
+          nearestOption(TIME_PER_DIV_OPTIONS_BY_SOURCE[info.active] ?? TIME_PER_DIV_OPTIONS_BY_SOURCE.mock, prev),
+        );
       })
       .catch(() => {
         // Backend not reachable yet -- keep the "mock" default, the
@@ -604,7 +623,7 @@ export function ScopeView() {
     // all 8 raw channel arrays (not just enabled ones), since
     // buildSeriesData filters to enabled channels afterward and every
     // array must stay the same length.
-    if (lastX !== null && newXs[0] - lastX > GAP_THRESHOLD_SEC) {
+    if (lastX !== null && newXs[0] - lastX > batch.dt * GAP_THRESHOLD_DT_MULTIPLIER) {
       xs.push(lastX + 1e-9);
       for (let ch = 0; ch < 8; ch++) buffersRef.current[ch].push(null);
     }

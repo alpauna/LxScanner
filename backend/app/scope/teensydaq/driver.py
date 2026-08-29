@@ -65,6 +65,12 @@ class TeensyDaqDriver(ScopeDriver):
         self._enabled: dict[int, dict] = {ch: {"range_v": 5.0} for ch in range(8)}
         self._range_v = 5.0
         self._connected = False
+        # Virtual sample clock -- see _read_frame for why this replaces a
+        # fresh time.monotonic() read per frame. Reset on every fresh
+        # serial connection (initial connect and each successful
+        # reconnect), since continuity genuinely breaks there.
+        self._t0_anchor: float | None = None
+        self._samples_emitted = 0
 
     async def connect(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -133,6 +139,8 @@ class TeensyDaqDriver(ScopeDriver):
 
     async def _open_port(self) -> None:
         self._ser = await asyncio.to_thread(self._connect_port)
+        self._t0_anchor = None
+        self._samples_emitted = 0
         self._set_connected(True)
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._acquire_loop, daemon=True)
@@ -169,6 +177,8 @@ class TeensyDaqDriver(ScopeDriver):
             try:
                 with self._ser_lock:
                     self._ser = self._connect_port()
+                self._t0_anchor = None
+                self._samples_emitted = 0
                 logger.info("Teensy DAQ reconnected")
                 self._set_connected(True)
                 return True
@@ -238,10 +248,34 @@ class TeensyDaqDriver(ScopeDriver):
                 continue
             channels[ch] = [samples[i * 8 + ch] * lsb for i in range(n_samples)]
 
+        # t0 is when *sample 0 of this frame* was acquired -- not when this
+        # read finished. A fresh time.monotonic() here would measure "now,"
+        # i.e. after the whole frame's serial transfer + checksum + unpack,
+        # which varies with OS/serial scheduling jitter (bench-measured
+        # 2026-08-29: adjacent frames' timestamps computed this way jittered
+        # by up to several ms, even went *negative* relative to the prior
+        # frame's computed end -- meaningless given the ADC free-runs
+        # continuously with no real gap between frames). Since the hardware
+        # sample rate itself is the authoritative clock, derive each frame's
+        # start from a running sample count instead: anchor once per
+        # connection to this frame's back-computed start (now minus its own
+        # duration), then every later frame's t0 is purely
+        # anchor + samples-emitted-so-far * dt -- immune to per-frame wall-
+        # clock jitter, and stays correct across a frame the backend's own
+        # outbound queue later drops under backpressure (see _enqueue),
+        # since samples_emitted only depends on frames this method actually
+        # read from the device, not on whether they reach a subscriber.
+        dt_sec = dt_us / 1e6
+        if self._t0_anchor is None:
+            self._t0_anchor = time.monotonic() - n_samples * dt_sec
+            self._samples_emitted = 0
+        t0 = self._t0_anchor + self._samples_emitted * dt_sec
+        self._samples_emitted += n_samples
+
         return {
             "type": "scope_batch",
-            "t0": time.monotonic(),
-            "dt": dt_us / 1e6,
+            "t0": t0,
+            "dt": dt_sec,
             "channels": channels,
         }
 
