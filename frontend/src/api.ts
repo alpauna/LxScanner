@@ -48,3 +48,28 @@ export async function setTimebase(nsPerDiv: number): Promise<void> {
     body: JSON.stringify({ ns_per_div: nsPerDiv }),
   });
 }
+
+export interface ScopeSourceInfo {
+  active: string;
+  available: string[];
+}
+
+export async function getScopeSource(): Promise<ScopeSourceInfo> {
+  const res = await fetch("/api/scope/source");
+  return res.json();
+}
+
+export interface SetScopeSourceResult {
+  ok: boolean;
+  source?: string;
+  error?: string;
+}
+
+export async function setScopeSource(source: string): Promise<SetScopeSourceResult> {
+  const res = await fetch("/api/scope/source", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source }),
+  });
+  return res.json();
+}

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useSocket } from "../ws";
-import { calibrateChannel, setChannelRange, setTimebase } from "../api";
+import { calibrateChannel, getScopeSource, setChannelRange, setScopeSource, setTimebase } from "../api";
 import type { ScopeEvent } from "../types";
 
 interface ChannelConfig {
@@ -46,23 +46,59 @@ const DEFAULT_CHANNELS: ChannelConfig[] = [
 const STORAGE_KEY = "lxscanner-scope-channels";
 const DIVS_X = 10;
 const DIVS_Y = 8;
-// Hardware timebase (ns_per_div) is a fixed 1-2-5 sequence, max 200ms/div
-// -- see vendor.py's __burst_mode_ns_per_div_to_id_dic. Values here are
-// in seconds and converted to ns_per_div (*1e9) when applied.
-const TIME_PER_DIV_OPTIONS = [
-  0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
-  0.2,
-];
+const SCOPE_SOURCE_LABELS: Record<string, string> = {
+  mock: "Mock",
+  hantek: "Hantek 1008C",
+  teensy: "Teensy DAQ",
+};
+// Hantek's hardware timebase (ns_per_div) is a fixed 1-2-5 sequence, max
+// 200ms/div -- see vendor.py's __burst_mode_ns_per_div_to_id_dic. Values
+// here are in seconds and converted to ns_per_div (*1e9) when applied via
+// the setTimebase RPC, which reconfigures the device's actual capture
+// window (not just a display zoom).
+//
+// The Teensy DAQ streams continuously; each displayed frame is a fixed
+// ~2.8ms window (128 samples x ~22us/sample, see docs/teensy_daq.md
+// Phase A) that gets replaced wholesale on every batch. There's no
+// hardware capture-window RPC to reconfigure for it (setTimebase is
+// skipped for this source), so its options are a pure display zoom
+// within that one frame rather than a request for a different window.
+const TIME_PER_DIV_OPTIONS_BY_SOURCE: Record<string, number[]> = {
+  hantek: [
+    0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+    0.2,
+  ],
+  mock: [
+    0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+    0.2,
+  ],
+  teensy: [0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005],
+};
 const VOLTS_PER_DIV_OPTIONS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20];
-// The hardware only has 3 real input ranges (see _nearest_vscale in
+// Hantek's hardware only has 3 real input ranges (see _nearest_vscale in
 // driver.py); these values each land solidly in one bucket. Found
 // 2026-08-25: a real signal (10x probe, 60Hz pickup, ~7.7Vpp) clipped
 // hard against the default 5V range's actual ~2.5V headroom.
-const RANGE_OPTIONS: { value: number; label: string }[] = [
-  { value: 1, label: "±1V (sensitive)" },
-  { value: 5, label: "±5V (sensors, default)" },
-  { value: 40, label: "±40V (ignition, mains)" },
-];
+//
+// The Teensy DAQ's AD7606C-16 runs in hardware mode, where one RANGE pin
+// selects +/-5V or +/-10V for all 8 channels at once (not per-channel) --
+// see teensydaq/driver.py's set_channel_range docstring.
+const RANGE_OPTIONS_BY_SOURCE: Record<string, { value: number; label: string }[]> = {
+  hantek: [
+    { value: 1, label: "±1V (sensitive)" },
+    { value: 5, label: "±5V (sensors, default)" },
+    { value: 40, label: "±40V (ignition, mains)" },
+  ],
+  mock: [
+    { value: 1, label: "±1V (sensitive)" },
+    { value: 5, label: "±5V (sensors, default)" },
+    { value: 40, label: "±40V (ignition, mains)" },
+  ],
+  teensy: [
+    { value: 5, label: "±5V (default)" },
+    { value: 10, label: "±10V" },
+  ],
+};
 // Probe/attenuator ratio, applied as a display-only multiplier on top of
 // the already-calibrated instrument-input voltage -- the actual value at
 // the probe tip is attenuation x what the scope's input sees. Distinct
@@ -152,6 +188,9 @@ export function ScopeView() {
   // until something changes -- absence of an event should never read as
   // "disconnected".
   const [scopeConnected, setScopeConnected] = useState(true);
+  const [scopeSource, setScopeSourceState] = useState<string>("mock");
+  const [availableSources, setAvailableSources] = useState<string[]>(["mock"]);
+  const [sourceBusy, setSourceBusy] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const buffersRef = useRef<Record<number, number[]>>(
@@ -208,6 +247,18 @@ export function ScopeView() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(channels));
   }, [channels]);
+
+  useEffect(() => {
+    getScopeSource()
+      .then((info) => {
+        setScopeSourceState(info.active);
+        setAvailableSources(info.available);
+      })
+      .catch(() => {
+        // Backend not reachable yet -- keep the "mock" default, the
+        // socket-status banner already covers reporting disconnection.
+      });
+  }, []);
 
   // Only visibility/color/order changes require rebuilding the uPlot
   // instance; offset changes are applied per-frame in the render tick
@@ -541,10 +592,39 @@ export function ScopeView() {
   async function applyTimePerDiv(v: number) {
     setTimebaseBusy(true);
     try {
-      await setTimebase(Math.round(v * 1e9));
+      // The Teensy DAQ has no hardware capture-window RPC (see
+      // TIME_PER_DIV_OPTIONS_BY_SOURCE above) -- Time/div there is a pure
+      // display zoom, so skip the backend call entirely for it.
+      if (scopeSource !== "teensy") {
+        await setTimebase(Math.round(v * 1e9));
+      }
       setZoomRange((z) => ({ ...z, x: null })); // stale relative to the new window
     } finally {
       setTimebaseBusy(false);
+    }
+  }
+
+  // Switches the active physical scope source. Connects the new driver
+  // before disturbing anything (see backend/app/scope/factory.py) -- on
+  // failure the backend leaves the previous source running untouched, so
+  // roll the UI back to it too rather than showing a source that isn't
+  // actually active. scopeConnected resets to true optimistically, same
+  // reasoning as its initial default: absence of a scope_status event
+  // must never read as "disconnected".
+  async function applySource(source: string) {
+    const previous = scopeSource;
+    setScopeSourceState(source);
+    setScopeConnected(true);
+    setSourceBusy(true);
+    try {
+      const result = await setScopeSource(source);
+      if (!result.ok) {
+        setScopeSourceState(previous);
+      }
+    } catch {
+      setScopeSourceState(previous);
+    } finally {
+      setSourceBusy(false);
     }
   }
 
@@ -556,16 +636,23 @@ export function ScopeView() {
     setZoomRange((z) => ({ ...z, y: [center - half, center + half] }));
   }
 
+  const rangeOptions = RANGE_OPTIONS_BY_SOURCE[scopeSource] ?? RANGE_OPTIONS_BY_SOURCE.mock;
+  const timePerDivOptions =
+    TIME_PER_DIV_OPTIONS_BY_SOURCE[scopeSource] ?? TIME_PER_DIV_OPTIONS_BY_SOURCE.mock;
+
   const effectiveXRange = zoomRange.x ?? liveXRange;
   const effectiveYRange = zoomRange.y ?? liveYRange;
-  const timePerDiv = nearestOption(TIME_PER_DIV_OPTIONS, (effectiveXRange[1] - effectiveXRange[0]) / DIVS_X);
+  const timePerDiv = nearestOption(timePerDivOptions, (effectiveXRange[1] - effectiveXRange[0]) / DIVS_X);
   const voltsPerDiv = nearestOption(VOLTS_PER_DIV_OPTIONS, (effectiveYRange[1] - effectiveYRange[0]) / DIVS_Y);
 
   // The Hantek 1008C has a fixed ~4000-sample capture budget shared
   // evenly across active channels, independent of the timebase -- see
   // docs/hantek1008c.md. More active channels means fewer samples/div
   // regardless of Time/div, which is what actually limits how well a
-  // fast signal resolves, not the timebase setting itself.
+  // fast signal resolves, not the timebase setting itself. This is
+  // specifically a Hantek hardware limit -- the Teensy DAQ streams
+  // continuously with no such fixed onboard budget, so the warning only
+  // applies when Hantek is the active source.
   const activeChannelCount = Math.max(channels.filter((c) => c.enabled).length, 1);
   const estSamplesPerDiv = Math.round(4000 / activeChannelCount / DIVS_X);
 
@@ -586,6 +673,20 @@ export function ScopeView() {
       />
       <div className="scope-channel-panel">
         <div className="scope-toolbar">
+          <label>
+            Source {sourceBusy && "…"}
+            <select
+              value={scopeSource}
+              disabled={sourceBusy}
+              onChange={(e) => void applySource(e.target.value)}
+            >
+              {availableSources.map((s) => (
+                <option key={s} value={s}>
+                  {SCOPE_SOURCE_LABELS[s] ?? s}
+                </option>
+              ))}
+            </select>
+          </label>
           <button onClick={resumeLive} disabled={!frozen}>
             {frozen ? "Resume live" : "Live"}
           </button>
@@ -611,7 +712,7 @@ export function ScopeView() {
               disabled={timebaseBusy}
               onChange={(e) => void applyTimePerDiv(Number(e.target.value))}
             >
-              {TIME_PER_DIV_OPTIONS.map((v) => (
+              {timePerDivOptions.map((v) => (
                 <option key={v} value={v}>
                   {formatTimePerDiv(v)}
                 </option>
@@ -633,16 +734,18 @@ export function ScopeView() {
           </label>
         </div>
 
-        <div
-          className={`scope-resolution-note ${
-            estSamplesPerDiv < 20 ? "scope-res-bad" : estSamplesPerDiv < 50 ? "scope-res-marginal" : ""
-          }`}
-          title="The device has a fixed ~4000-sample capture budget split evenly across active channels, independent of Time/div -- fewer active channels means finer resolution on fast signals in the same capture. See docs/hantek1008c.md."
-        >
-          ~{estSamplesPerDiv} samples/div ({activeChannelCount} ch active)
-          {estSamplesPerDiv < 20 && " -- too few for fast signals, disable channels"}
-          {estSamplesPerDiv >= 20 && estSamplesPerDiv < 50 && " -- marginal for fast signals"}
-        </div>
+        {scopeSource === "hantek" && (
+          <div
+            className={`scope-resolution-note ${
+              estSamplesPerDiv < 20 ? "scope-res-bad" : estSamplesPerDiv < 50 ? "scope-res-marginal" : ""
+            }`}
+            title="The device has a fixed ~4000-sample capture budget split evenly across active channels, independent of Time/div -- fewer active channels means finer resolution on fast signals in the same capture. See docs/hantek1008c.md."
+          >
+            ~{estSamplesPerDiv} samples/div ({activeChannelCount} ch active)
+            {estSamplesPerDiv < 20 && " -- too few for fast signals, disable channels"}
+            {estSamplesPerDiv >= 20 && estSamplesPerDiv < 50 && " -- marginal for fast signals"}
+          </div>
+        )}
 
         <div className="scope-cursor-controls">
           <label className="scope-cursor-toggle">
@@ -730,7 +833,7 @@ export function ScopeView() {
                   onChange={(e) => void applyChannelRange(c.id, Number(e.target.value))}
                   title="Input range -- a signal exceeding this clips before it's digitized"
                 >
-                  {RANGE_OPTIONS.map((r) => (
+                  {rangeOptions.map((r) => (
                     <option key={r.value} value={r.value}>
                       {r.label}
                     </option>

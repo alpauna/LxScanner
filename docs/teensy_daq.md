@@ -250,6 +250,31 @@ host wants to buffer/record," not a fixed onboard limit.
   uninterrupted through a real source switch (mock<->teensy), and a
   switch to an invalid source name was rejected with an error while the
   active source kept streaming the whole time.
+- **Frontend source selector added, 2026-08-29** -- `ScopeView.tsx`
+  gained a Source dropdown (mock/Hantek/Teensy) in the toolbar, backed
+  by new `getScopeSource`/`setScopeSource` calls in `api.ts`. Discovered
+  along the way that `RANGE_OPTIONS` and `TIME_PER_DIV_OPTIONS` were
+  Hantek-hardware constants hardcoded directly into the component (not
+  just comments) -- split both into per-source tables:
+  `RANGE_OPTIONS_BY_SOURCE.teensy` is `[5V, 10V]`, matching the
+  AD7606C-16's actual hardware-mode range pin (shared across all 8
+  channels, not per-channel); `TIME_PER_DIV_OPTIONS_BY_SOURCE.teensy` is
+  a pure display-zoom range (10-500us/div) within one ~2.8ms frame
+  (128 samples x ~22us/sample) rather than a hardware capture-window
+  request, since the Teensy has no such RPC and streams continuously --
+  `setTimebase` is skipped entirely when Teensy is the active source.
+  The Hantek's ~4000-sample/8-channel resolution warning is now gated
+  to only render when Hantek is the active source, since it doesn't
+  apply to continuous streaming. `scopeConnected` resets to `true`
+  optimistically on every source switch, matching the same reasoning as
+  its initial default. Verified end-to-end against real hardware with
+  both the Hantek and the Teensy simultaneously connected: `GET
+  /api/scope/source` through the Vite dev-server proxy, switching lived
+  between all three sources via `POST /api/scope/source`, and a raw
+  `/ws/stream/scope` capture confirmed live Teensy `scope_batch` frames
+  (dt=22us, 128 samples, real V1 waveform values) flowing after a
+  switch. Manual in-browser check of the dropdown UI itself is still
+  outstanding (no browser automation available in this environment).
 - Calibration: the Hantek's built-in cal-signal trick doesn't carry over
   (this board has no such reference) -- reuse the original bench-supply
   multi-point DC calibration design instead. Revisit an onboard
