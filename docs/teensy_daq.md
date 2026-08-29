@@ -223,14 +223,22 @@ host wants to buffer/record," not a fixed onboard limit.
   since 45kHz sampling a 1kHz signal resolves real shape, not just
   aliased points.
 - Finalize the wire protocol based on what Phase 1 actually measured.
-- New `backend/app/scope/teensydaq/driver.py` implementing `ScopeDriver`
-  (`connect`, `disconnect`, `configure_channels`, `set_channel_range`,
-  `set_timebase`, `calibrate_channel`, `stream`) -- mirror
-  `HantekScopeDriver`'s structure (`backend/app/scope/hantek1008/driver.py`)
-  where the pattern fits, diverge where continuous streaming genuinely
-  needs a different shape (no burst-mode "request a batch" call to wrap
-  -- more like a persistent read loop). `LXSCANNER_SCOPE_SOURCE=teensydaq`
-  wired into `app/main.py` the same way `=hantek` is today.
+- **`backend/app/scope/teensydaq/driver.py` written and bench-verified,
+  2026-08-29** -- `TeensyDaqDriver` implementing `ScopeDriver`, mirroring
+  `HantekScopeDriver`'s structure (background thread owns the blocking
+  I/O, pushes parsed batches into an `asyncio.Queue` via
+  `loop.call_soon_threadsafe`; reconnect-with-backoff and `scope_status`
+  events reused for the same real-world reason Hantek has them). Parses
+  the Phase A binary frame protocol, converts raw codes to volts using
+  the AD7606C-16's hardware-mode LSB tables. `set_channel_range` sets
+  the one RANGE pin shared across all 8 channels (documented
+  simplification, same spirit as Hantek's `sample_rate_hz` being
+  informational-only for its own hardware-reality mismatch).
+  `pyserial` added to the backend's `scope` extras. Verified standalone
+  (no FastAPI app needed) against the known +/-1.24V reference signal --
+  correct `scope_status`, correct 22us/sample timing matching the
+  firmware, V1 batches showing the same signal with visible transitions
+  within batches.
 - Calibration: the Hantek's built-in cal-signal trick doesn't carry over
   (this board has no such reference) -- reuse the original bench-supply
   multi-point DC calibration design instead. Revisit an onboard

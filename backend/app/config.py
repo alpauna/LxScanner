@@ -7,9 +7,14 @@ PORT = 8000
 # /ws/ingest/obd). Override with LXSCANNER_OBD_SOURCE=esp32.
 OBD_SOURCE = os.environ.get("LXSCANNER_OBD_SOURCE", "mock")
 
-# "mock" (default, no hardware needed) or "hantek" (real Hantek 1008C over
-# USB). Override with LXSCANNER_SCOPE_SOURCE=hantek.
+# "mock" (default, no hardware needed), "hantek" (real Hantek 1008C over
+# USB), or "teensy" (Teensy 4.1 + AD7606C-16 DAQ over USB serial).
+# Override with LXSCANNER_SCOPE_SOURCE=hantek|teensy.
 SCOPE_SOURCE = os.environ.get("LXSCANNER_SCOPE_SOURCE", "mock")
+
+# Serial port for the Teensy DAQ. Override with LXSCANNER_TEENSY_PORT if
+# it doesn't enumerate as /dev/ttyACM0.
+TEENSY_PORT = os.environ.get("LXSCANNER_TEENSY_PORT", "/dev/ttyACM0")
 
 # Standard OBD-II PIDs polled in scanner mode (mode 01).
 SCANNER_PIDS: dict[str, tuple[str, str]] = {
