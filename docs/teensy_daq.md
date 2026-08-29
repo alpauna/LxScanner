@@ -239,6 +239,17 @@ host wants to buffer/record," not a fixed onboard limit.
   correct `scope_status`, correct 22us/sample timing matching the
   firmware, V1 batches showing the same signal with visible transitions
   within batches.
+- **Runtime scope-source switching added and bench-verified, 2026-08-29**
+  -- new `app/scope/factory.py` (`create_scope_driver`,
+  `switch_scope_source`) shared by startup (`main.py`'s `lifespan`) and
+  new `GET`/`POST /api/scope/source` endpoints, so both paths build/swap
+  drivers identically. Connects the *new* driver before touching
+  anything else -- a failed switch (hardware not present) leaves the
+  old driver running untouched rather than dropping the active source.
+  Verified: a live `/ws/stream/scope` WebSocket kept flowing
+  uninterrupted through a real source switch (mock<->teensy), and a
+  switch to an invalid source name was rejected with an error while the
+  active source kept streaming the whole time.
 - Calibration: the Hantek's built-in cal-signal trick doesn't carry over
   (this board has no such reference) -- reuse the original bench-supply
   multi-point DC calibration design instead. Revisit an onboard

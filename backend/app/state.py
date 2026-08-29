@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from app.hub import Hub
@@ -15,4 +16,6 @@ class AppState:
     obd_source: OBD2Source
     scope_driver: ScopeDriver
     recorder: SessionRecorder
+    scope_source: str = "mock"
+    scope_task: asyncio.Task | None = None
     current_mode: Mode = "scanner"

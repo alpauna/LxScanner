@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.models import Mode
+from app.scope.factory import SCOPE_SOURCES, switch_scope_source
 from app.state import AppState
 
 
@@ -17,6 +18,10 @@ class ChannelRangeRequest(BaseModel):
 
 class TimebaseRequest(BaseModel):
     ns_per_div: int
+
+
+class ScopeSourceRequest(BaseModel):
+    source: str
 
 
 def register(app_state: AppState) -> APIRouter:
@@ -64,5 +69,13 @@ def register(app_state: AppState) -> APIRouter:
     async def set_timebase(req: TimebaseRequest) -> dict:
         await app_state.scope_driver.set_timebase(req.ns_per_div)
         return {"ns_per_div": req.ns_per_div}
+
+    @router.get("/scope/source")
+    async def get_scope_source() -> dict:
+        return {"active": app_state.scope_source, "available": list(SCOPE_SOURCES)}
+
+    @router.post("/scope/source")
+    async def set_scope_source(req: ScopeSourceRequest) -> dict:
+        return await switch_scope_source(app_state, req.source)
 
     return router
