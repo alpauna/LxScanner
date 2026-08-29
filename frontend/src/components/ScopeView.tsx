@@ -44,8 +44,23 @@ const DEFAULT_CHANNELS: ChannelConfig[] = [
 ];
 
 const STORAGE_KEY = "lxscanner-scope-channels";
+const HISTORY_STORAGE_KEY = "lxscanner-scope-history-seconds";
 const DIVS_X = 10;
 const DIVS_Y = 8;
+// How much retained history the rolling buffer keeps for Freeze+Pan to
+// scrub through. Configurable (not just a code constant) since the
+// right depth trades off against memory/redraw cost -- 5s at Teensy's
+// ~45.4kHz x8ch is ~15MB; 20s is ~58MB and every freeze/pan-commit/
+// Volts-div/source-switch rebuilds the whole uPlot instance with
+// however much is loaded, so very large values may feel janky.
+const HISTORY_SECONDS_OPTIONS = [1, 2, 5, 10, 20];
+const DEFAULT_HISTORY_SECONDS = 5;
+// Threshold to distinguish a real dead-time gap (Hantek bursts have
+// ~tens-to-hundreds of ms of real USB-overhead dead time between them)
+// from normal streaming cadence (Teensy's ~22us/sample, Mock's exact
+// zero gap by construction) -- comfortably above the latter, comfortably
+// below the former.
+const GAP_THRESHOLD_SEC = 0.005;
 const SCOPE_SOURCE_LABELS: Record<string, string> = {
   mock: "Mock",
   hantek: "Hantek 1008C",
@@ -127,8 +142,38 @@ function loadChannels(): ChannelConfig[] {
   return DEFAULT_CHANNELS;
 }
 
+function loadHistorySeconds(): number {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (raw) {
+      const n = Number(raw);
+      if (HISTORY_SECONDS_OPTIONS.includes(n)) return n;
+    }
+  } catch {
+    // fall through to default
+  }
+  return DEFAULT_HISTORY_SECONDS;
+}
+
 function nearestOption(options: number[], value: number): number {
   return options.reduce((best, opt) => (Math.abs(opt - value) < Math.abs(best - value) ? opt : best));
+}
+
+// Plain for-loop rather than `dst.push(...src)` -- spread/apply has an
+// engine argument-count ceiling that a large batch could in principle hit.
+function appendAll<T>(dst: T[], src: readonly T[]) {
+  for (let i = 0; i < src.length; i++) dst.push(src[i]);
+}
+
+function lowerBound(sorted: number[], target: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 function formatTimePerDiv(v: number): string {
@@ -193,7 +238,7 @@ export function ScopeView() {
   const [sourceBusy, setSourceBusy] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
-  const buffersRef = useRef<Record<number, number[]>>(
+  const buffersRef = useRef<Record<number, (number | null)[]>>(
     Object.fromEntries(DEFAULT_CHANNELS.map((c) => [c.id, []])),
   );
   const xBufferRef = useRef<number[]>([]);
@@ -209,15 +254,34 @@ export function ScopeView() {
   const [timebaseBusy, setTimebaseBusy] = useState(false);
   const [rangeBusy, setRangeBusy] = useState<Record<number, boolean>>({});
 
-  const [frozen, setFrozen] = useState(false);
-  const frozenRef = useRef(frozen);
-  frozenRef.current = frozen;
+  // Desired live-window width in seconds, driven by the Time/div control.
+  // Promoted to real state (rather than derived from the current zoom
+  // span, as before) because the live x-range now has to be *computed*
+  // from it every render -- see the plot-creation effect's x scale
+  // `range()` below. The ref mirror is required, not just idiomatic:
+  // that `range()` closure lives inside an effect keyed on
+  // structuralKey/zoomKey, so it wouldn't see a plain-state update.
+  const [timePerDivSec, setTimePerDivSec] = useState(0.001);
+  const timePerDivSecRef = useRef(timePerDivSec);
+  timePerDivSecRef.current = timePerDivSec;
+
+  const [historySeconds, setHistorySeconds] = useState<number>(loadHistorySeconds);
+  const historySecondsRef = useRef(historySeconds);
+  historySecondsRef.current = historySeconds;
 
   const [panMode, setPanMode] = useState(false);
   const panModeRef = useRef(panMode);
   panModeRef.current = panMode;
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<PanStart | null>(null);
+  // The x range() function's drag branch returns this, not uPlot's own
+  // dataMin/dataMax -- setData() calls from ongoing background ingestion
+  // (which never pauses, even mid-drag) also trigger range() with
+  // auto-fit bounds unrelated to the drag, and would otherwise stomp the
+  // dragged position between mousemove events. This ref is the single
+  // source of truth for "where the drag currently is," updated only by
+  // onMove's own setScale() call below.
+  const panScaleXRef = useRef<Range | null>(null);
 
   const [hCursors, setHCursors] = useState<CursorPair>({ enabled: false, a: 0, b: 0 });
   const [vCursors, setVCursors] = useState<CursorPair>({ enabled: false, a: 0, b: 0 });
@@ -230,10 +294,9 @@ export function ScopeView() {
     x: null,
     y: null,
   });
-  // Live auto-fit range, sampled periodically while streaming, so the
-  // time/div and volts/div readouts mean something even before the user
-  // freezes or manually sets a scale.
-  const [liveXRange, setLiveXRange] = useState<Range>([0, 1]);
+  // Live auto-fit Y range, sampled periodically while streaming, so the
+  // Volts/div readout means something even before the user freezes or
+  // manually sets a scale. X has no equivalent -- see computeLiveXRange.
   const [liveYRange, setLiveYRange] = useState<Range>([-5, 5]);
 
   const draggingRef = useRef<DragTarget>(null);
@@ -247,6 +310,10 @@ export function ScopeView() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(channels));
   }, [channels]);
+
+  useEffect(() => {
+    localStorage.setItem(HISTORY_STORAGE_KEY, String(historySeconds));
+  }, [historySeconds]);
 
   useEffect(() => {
     getScopeSource()
@@ -274,12 +341,59 @@ export function ScopeView() {
 
   function buildSeriesData(): uPlot.AlignedData {
     const visible = channelsRef.current.filter((c) => c.enabled);
+    // Always hand uPlot fresh array objects, never buffersRef.current's
+    // own arrays directly (even in the "no transform needed" fast path)
+    // -- ingestion now appends in place via .push() for performance
+    // (see the WS handler), rather than replacing the array wholesale
+    // like the old per-batch code did. uPlot's setData() likely does a
+    // reference-equality fast path internally; handing back the *same*
+    // mutated-in-place array on a later call can make it think nothing
+    // changed and skip reprocessing, even though the contents grew.
     const series = visible.map((c) =>
       c.attenuation === 1 && c.offset === 0
-        ? buffersRef.current[c.id]
-        : buffersRef.current[c.id].map((v) => v * c.attenuation + c.offset),
+        ? buffersRef.current[c.id].slice()
+        : buffersRef.current[c.id].map((v) => (v === null ? null : v * c.attenuation + c.offset)),
     );
-    return [xBufferRef.current, ...series] as unknown as uPlot.AlignedData;
+    return [xBufferRef.current.slice(), ...series] as unknown as uPlot.AlignedData;
+  }
+
+  // Drops retained history older than `seconds` (relative to the newest
+  // sample), by timestamp rather than sample count -- avoids needing to
+  // reason about per-source rate math, and self-amortizes: most calls are
+  // a no-op (buffer not yet 2x over target), so the O(n) slice only
+  // actually runs roughly once per `seconds` worth of new data. This also
+  // means a sudden large forward time jump (tab backgrounded, one batch
+  // arrives with a far-future t0) gets caught on the very next batch,
+  // where a count-based ratio might not notice for a while.
+  function trimBuffers(seconds: number) {
+    const xs = xBufferRef.current;
+    if (xs.length === 0) return;
+    const latest = xs[xs.length - 1];
+    if (xs[0] >= latest - seconds * 2) return;
+    const cutIdx = lowerBound(xs, latest - seconds);
+    if (cutIdx <= 0) return;
+    xBufferRef.current = xs.slice(cutIdx);
+    for (let ch = 0; ch < 8; ch++) {
+      buffersRef.current[ch] = buffersRef.current[ch].slice(cutIdx);
+    }
+  }
+
+  function clearHistory() {
+    xBufferRef.current = [];
+    for (let ch = 0; ch < 8; ch++) buffersRef.current[ch] = [];
+  }
+
+  // Computes the live sliding window directly from the buffer/ref, not
+  // from the plot's last-rendered scale -- the plot's scale is only as
+  // fresh as the last time setData()/range() actually ran, which is
+  // gated by the RAF render tick and can lag arbitrarily (confirmed via
+  // a throttled tab lagging several seconds behind the true buffer here).
+  // xBufferRef/timePerDivSecRef are written synchronously and are always
+  // current regardless of rendering cadence.
+  function computeLiveXRange(): Range {
+    const buf = xBufferRef.current;
+    const latest = buf.length ? buf[buf.length - 1] : 1;
+    return [latest - timePerDivSecRef.current * DIVS_X, latest];
   }
 
   function repositionCursors() {
@@ -288,7 +402,10 @@ export function ScopeView() {
     if (!plot || !els) return;
     const h = hCursorsRef.current;
     const v = vCursorsRef.current;
-    const t0 = xBufferRef.current[0] ?? 0;
+    // The viewport's own left edge, not the buffer's oldest retained
+    // sample -- with retained history that could be many seconds back,
+    // which would make cursor deltas read as huge, meaningless offsets.
+    const t0 = plot.scales.x.min ?? 0;
 
     els.h1.style.display = els.h2.style.display = h.enabled ? "block" : "none";
     els.v1.style.display = els.v2.style.display = v.enabled ? "block" : "none";
@@ -311,18 +428,40 @@ export function ScopeView() {
     const el = containerRef.current;
     if (!el) return;
     const visible = channelsRef.current.filter((c) => c.enabled);
-    const t0 = xBufferRef.current[0] ?? 0;
     const opts: uPlot.Options = {
       width: el.clientWidth || 800,
       height: el.clientHeight || 520,
       scales: {
-        x: { time: false, ...(zoomRange.x ? { range: () => zoomRange.x! } : {}) },
+        x: {
+          time: false,
+          range: () => {
+            // Active pan drag: return the drag's own tracked position
+            // (panScaleXRef), not uPlot's dataMin/dataMax -- background
+            // ingestion never pauses mid-drag, and its setData() calls
+            // also invoke this range() function with auto-fit bounds
+            // unrelated to the drag, which would otherwise stomp the
+            // dragged position between mousemove events (confirmed: the
+            // final position after a full drag matched the pre-drag
+            // position exactly, with no net movement).
+            if (panStartRef.current) return panScaleXRef.current ?? computeLiveXRange();
+            if (zoomRange.x) return zoomRange.x;
+            // Live: slide a window of the desired Time/div width to
+            // follow the newest retained sample, rather than trusting
+            // uPlot's own auto-fit (which would show the *entire*
+            // retained history compressed, not a scrolling recent slice,
+            // now that the buffer can hold many seconds of it).
+            return computeLiveXRange();
+          },
+        },
         y: { ...(zoomRange.y ? { range: () => zoomRange.y! } : {}) },
       },
       axes: [
         {
           splits: evenSplits(DIVS_X),
-          values: (_u, ticks) => ticks.map((t) => formatRelTime(t - t0)),
+          // Reads the viewport's own left edge (u.scales.x.min), not a
+          // closure-captured buffer start -- same reasoning as
+          // repositionCursors above.
+          values: (u, ticks) => ticks.map((t) => formatRelTime(t - (u.scales.x.min ?? 0))),
         },
         {
           splits: evenSplits(DIVS_Y),
@@ -364,7 +503,11 @@ export function ScopeView() {
         xUnitsPerPx: (xRange[1] - xRange[0]) / rect.width,
         yUnitsPerPx: (yRange[1] - yRange[0]) / rect.height,
       };
-      setFrozen(true);
+      panScaleXRef.current = xRange;
+      // No zoomRange pin here -- the x range() function above already
+      // tracks the live drag position for the whole drag duration
+      // (panStartRef.current branch), and onUp's setZoomRange commit
+      // below naturally derives `frozen = true` once the drag ends.
       setIsPanning(true);
     });
 
@@ -387,7 +530,8 @@ export function ScopeView() {
       if (pan) {
         const dx = (e.clientX - pan.clientX) * pan.xUnitsPerPx;
         const dy = (e.clientY - pan.clientY) * pan.yUnitsPerPx;
-        plot.setScale("x", { min: pan.xRange[0] - dx, max: pan.xRange[1] - dx });
+        panScaleXRef.current = [pan.xRange[0] - dx, pan.xRange[1] - dx];
+        plot.setScale("x", { min: panScaleXRef.current[0], max: panScaleXRef.current[1] });
         plot.setScale("y", { min: pan.yRange[0] + dy, max: pan.yRange[1] + dy });
         return;
       }
@@ -407,12 +551,16 @@ export function ScopeView() {
       draggingRef.current = null;
       const plot = plotRef.current;
       if (panStartRef.current && plot) {
+        // panScaleXRef, not plot.scales.x -- same reasoning as the
+        // range() drag branch above: background ingestion's own setData
+        // calls can race a read of the plot's scale right at mouseup.
         setZoomRange({
-          x: [plot.scales.x.min ?? 0, plot.scales.x.max ?? 1],
+          x: panScaleXRef.current ?? [plot.scales.x.min ?? 0, plot.scales.x.max ?? 1],
           y: [plot.scales.y.min ?? -5, plot.scales.y.max ?? 5],
         });
       }
       panStartRef.current = null;
+      panScaleXRef.current = null;
       setIsPanning(false);
     }
     window.addEventListener("mousemove", onMove);
@@ -429,37 +577,74 @@ export function ScopeView() {
       return;
     }
     const batch = event;
-    // Each burst-mode capture is a self-contained window (a few ms), with
-    // real dead time before the next one (USB/protocol overhead between
-    // captures -- see docs/hantek1008c.md). Concatenating batches into one
-    // rolling buffer drew a straight line across that dead time, faking a
-    // ramp between real captures. So each new batch replaces the buffer
-    // outright rather than appending to a rolling history.
     const nSamples = Object.values(batch.channels)[0]?.length ?? 0;
-    const xs = new Array<number>(nSamples);
+    if (nSamples === 0) return;
+    const newXs = new Array<number>(nSamples);
     for (let i = 0; i < nSamples; i++) {
-      xs[i] = batch.t0 + i * batch.dt;
+      newXs[i] = batch.t0 + i * batch.dt;
     }
-    xBufferRef.current = xs;
-    const buffers: Record<number, number[]> = {};
+
+    // Timeline went backwards (stray backend-restart edge case -- a
+    // fresh process's monotonic clock starts small again): can't bridge
+    // it, so discard the old, now-incomparable history.
+    const xs0 = xBufferRef.current;
+    if (xs0.length > 0 && newXs[0] < xs0[xs0.length - 1]) {
+      clearHistory();
+    }
+
+    const xs = xBufferRef.current;
+    const lastX = xs.length ? xs[xs.length - 1] : null;
+    // Each burst-mode capture is a self-contained window, with real dead
+    // time before the next one for Hantek (USB/protocol overhead between
+    // captures -- see docs/hantek1008c.md); Teensy/Mock have no designed
+    // gap. Rather than replacing the buffer outright (which drew a
+    // straight line across that dead time, faking a ramp), insert one
+    // null marker -- uPlot's documented gap sentinel -- when the gap is
+    // real, then append into the rolling history. The marker goes into
+    // all 8 raw channel arrays (not just enabled ones), since
+    // buildSeriesData filters to enabled channels afterward and every
+    // array must stay the same length.
+    if (lastX !== null && newXs[0] - lastX > GAP_THRESHOLD_SEC) {
+      xs.push(lastX + 1e-9);
+      for (let ch = 0; ch < 8; ch++) buffersRef.current[ch].push(null);
+    }
+
+    appendAll(xs, newXs);
     for (let ch = 0; ch < 8; ch++) {
-      buffers[ch] = batch.channels[String(ch)] ?? new Array(nSamples).fill(NaN);
+      const values = batch.channels[String(ch)] ?? new Array<null>(nSamples).fill(null);
+      appendAll(buffersRef.current[ch], values);
     }
-    buffersRef.current = buffers;
+
+    // Skip trimming while frozen: the pinned viewport can be anywhere in
+    // the buffer, and trimming purely relative to "now" would eventually
+    // age it out from under the user mid-inspection (reproduced: freeze,
+    // wait longer than historySeconds, the pinned window silently falls
+    // out of the retained range, leaving a blank chart with the
+    // underlying data already gone -- not just out of view). Ingestion
+    // still keeps running so nothing is missed; resumeLive() re-imposes
+    // the bound in one catch-up trim once the pin is released.
+    if (zoomRange.x === null) trimBuffers(historySecondsRef.current);
     dirtyRef.current = true;
   });
 
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      if (dirtyRef.current && plotRef.current && !frozenRef.current) {
+      // No longer gated on frozen: ingestion/rendering must keep running
+      // in the background while paused, so panning can reach data
+      // accumulated *during* the pause, and Resume-live has no gap to
+      // catch up on. Freeze instead pins the viewport (zoomRange) --
+      // see freezeViewport below -- which the x/y range() functions
+      // respect regardless of whether setData keeps getting called.
+      if (dirtyRef.current && plotRef.current) {
         plotRef.current.setData(buildSeriesData());
         dirtyRef.current = false;
         tickCounterRef.current++;
+        // Y only -- X's "live" range is now computeLiveXRange() (buffer-
+        // based, always current), so there's nothing left reading a
+        // throttled liveXRange snapshot.
         if (tickCounterRef.current % 15 === 0) {
-          const sx = plotRef.current.scales.x;
           const sy = plotRef.current.scales.y;
-          if (sx.min != null && sx.max != null) setLiveXRange([sx.min, sx.max]);
           if (sy.min != null && sy.max != null) setLiveYRange([sy.min, sy.max]);
         }
       }
@@ -524,17 +709,21 @@ export function ScopeView() {
     }
   }
 
-  // liveXRange/liveYRange (React state) is throttled for display purposes
-  // and can lag well behind reality -- e.g. still at its stale initial
-  // default for several seconds after load. Placing a cursor from that
-  // would put it outside the actually-visible range (rendered, but off
-  // screen -- looks exactly like "cursors don't work"). The plot's own
-  // scales are always current, so read those directly for anything that
-  // needs to be correct right now.
+  // liveYRange (React state) is throttled for display purposes and can
+  // lag well behind reality -- e.g. still at its stale initial default
+  // for several seconds after load. Placing a cursor from that would put
+  // it outside the actually-visible range (rendered, but off screen --
+  // looks exactly like "cursors don't work"). The plot's own Y scale is
+  // current as of the last actual render, which is good enough for Y
+  // (bounded values, unlike X's ever-advancing timestamp -- see
+  // computeLiveXRange for why X needs a stronger guarantee).
   function getCurrentXRange(): Range {
     if (zoomRange.x) return zoomRange.x;
-    const s = plotRef.current?.scales.x;
-    return s?.min != null && s?.max != null ? [s.min, s.max] : liveXRange;
+    // computeLiveXRange (buffer/ref-based), not the plot's rendered
+    // scale -- the scale is only as fresh as the last RAF-gated setData
+    // call, which can lag behind the true buffer (confirmed: a throttled
+    // tab lagged several seconds here, and this feeds Freeze's pin).
+    return computeLiveXRange();
   }
 
   function getCurrentYRange(): Range {
@@ -543,10 +732,25 @@ export function ScopeView() {
     return s?.min != null && s?.max != null ? [s.min, s.max] : liveYRange;
   }
 
+  // Pins the viewport at its current live position, on both axes. This
+  // *is* what "frozen" means now (see the derived `frozen` below) --
+  // every action that used to just flip a `frozen` boolean must pin
+  // zoomRange instead, or the live x range() function above keeps
+  // sliding forward under a nominally "frozen" trace. Callers that need
+  // the pinned value in the same tick (e.g. for cursor placement math)
+  // must use the return value, not re-read zoomRange state afterward --
+  // setState isn't synchronous.
+  function freezeViewport(): { x: Range; y: Range } {
+    const x = getCurrentXRange();
+    const y = getCurrentYRange();
+    setZoomRange({ x, y });
+    return { x, y };
+  }
+
   function toggleHCursors(enabled: boolean) {
     if (enabled) {
-      setFrozen(true);
-      const [min, max] = getCurrentYRange();
+      const { y } = freezeViewport();
+      const [min, max] = y;
       const span = max - min || 1;
       setHCursors({ enabled: true, a: min + span * 0.3, b: min + span * 0.7 });
     } else {
@@ -556,8 +760,8 @@ export function ScopeView() {
 
   function toggleVCursors(enabled: boolean) {
     if (enabled) {
-      setFrozen(true);
-      const [min, max] = getCurrentXRange();
+      const { x } = freezeViewport();
+      const [min, max] = x;
       const span = max - min || 1;
       setVCursors({ enabled: true, a: min + span * 0.3, b: min + span * 0.7 });
     } else {
@@ -566,10 +770,14 @@ export function ScopeView() {
   }
 
   function zoomToCursors() {
-    setZoomRange({
-      x: vCursors.enabled ? [Math.min(vCursors.a, vCursors.b), Math.max(vCursors.a, vCursors.b)] : null,
-      y: hCursors.enabled ? [Math.min(hCursors.a, hCursors.b), Math.max(hCursors.a, hCursors.b)] : null,
-    });
+    // Preserve the current pin on an axis whose cursors aren't enabled,
+    // rather than forcing it back to `null` (live) -- with `frozen`
+    // derived from `zoomRange.x`, blindly nulling it here would silently
+    // un-freeze time as a side effect of a Y-only cursor zoom.
+    setZoomRange((z) => ({
+      x: vCursors.enabled ? [Math.min(vCursors.a, vCursors.b), Math.max(vCursors.a, vCursors.b)] : z.x,
+      y: hCursors.enabled ? [Math.min(hCursors.a, hCursors.b), Math.max(hCursors.a, hCursors.b)] : z.y,
+    }));
   }
 
   function resetZoom() {
@@ -577,49 +785,34 @@ export function ScopeView() {
   }
 
   function resumeLive() {
-    setFrozen(false);
     setPanMode(false);
     setHCursors((c) => ({ ...c, enabled: false }));
     setVCursors((c) => ({ ...c, enabled: false }));
     setZoomRange({ x: null, y: null });
+    // Catch up trimming skipped while frozen (see the WS handler) --
+    // otherwise a long pause leaves the buffer over-grown until enough
+    // new data organically arrives to trigger the next trim.
+    trimBuffers(historySecondsRef.current);
   }
 
-  // Reconfigures the actual hardware capture window (not just a display
-  // zoom -- see docs/hantek1008c.md, "found needing a real 60Hz sine to
-  // display and discovering the default 5ms window can't show one").
-  // Takes a moment (device reopen), so this doesn't force a freeze --
-  // if live, the new window just shows up on the next batch.
+  // Sets the desired live-window width. For Hantek this also reconfigures
+  // the actual hardware capture window (not just a display zoom -- see
+  // docs/hantek1008c.md, "found needing a real 60Hz sine to display and
+  // discovering the default 5ms window can't show one") -- the Teensy DAQ
+  // has no such RPC (every frame is a fixed ~22us/sample stream with no
+  // settable window), so that branch is skipped for it, and Mock's
+  // backend `set_timebase` is a no-op. Either way, going live (zoomRange.x
+  // = null) hands control to the x scale's range() function in the
+  // plot-creation effect, which now computes the sliding live window from
+  // `timePerDivSec` on every render -- no freeze/absolute-zoom hack needed
+  // (the retained rolling buffer means there's always real data to slide
+  // across, unlike the old single-frame-per-batch model).
   async function applyTimePerDiv(v: number) {
     setTimebaseBusy(true);
     try {
-      if (scopeSource === "teensy") {
-        // The Teensy DAQ has no hardware capture-window RPC (see
-        // TIME_PER_DIV_OPTIONS_BY_SOURCE above) -- every frame is a fixed
-        // ~2.8ms window, so `zoomRange.x = null` (auto-fit to live data)
-        // always recomputes to the same span no matter what's selected.
-        // Do a real display zoom into the currently buffered frame
-        // instead, same as applyVoltsPerDiv's y-zoom below. Freezing
-        // matters here: the x buffer holds absolute batch timestamps that
-        // keep advancing as new frames replace it, so an absolute zoom
-        // range only stays valid once nothing new is being rendered.
-        //
-        // Center on xBufferRef directly, not the plot's own rendered
-        // scale (getCurrentXRange/liveXRange) -- those only update once
-        // per animation frame, and rAF can lag arbitrarily (throttled
-        // background tabs measured 10+ seconds behind here) while
-        // xBufferRef is written synchronously by the WebSocket handler
-        // the instant a batch arrives, independent of rendering.
-        setFrozen(true);
-        const buf = xBufferRef.current;
-        const min = buf[0] ?? 0;
-        const max = buf[buf.length - 1] ?? min + 1;
-        const center = (min + max) / 2;
-        const half = (v * DIVS_X) / 2;
-        setZoomRange((z) => ({ ...z, x: [center - half, center + half] }));
-      } else {
-        await setTimebase(Math.round(v * 1e9));
-        setZoomRange((z) => ({ ...z, x: null })); // stale relative to the new window
-      }
+      setTimePerDivSec(v);
+      if (scopeSource !== "teensy") await setTimebase(Math.round(v * 1e9));
+      setZoomRange((z) => ({ ...z, x: null }));
     } finally {
       setTimebaseBusy(false);
     }
@@ -637,6 +830,24 @@ export function ScopeView() {
     setScopeSourceState(source);
     setScopeConnected(true);
     setSourceBusy(true);
+    // A source switch isn't a gap to bridge, it's a different, often
+    // incomparable clock entirely (Hantek/Teensy use the backend
+    // process's time.monotonic(); Mock's is a synthetic clock that
+    // resets to 0 on every fresh MockDriver instance, which is
+    // constructed anew on every switch to mock) -- clear the retained
+    // history rather than let a real gap-marker try to bridge it, and
+    // drop anything anchored to the old timeline. Doing this
+    // unconditionally (not just on success) is fine: the backend
+    // connects the new driver before touching the old one, so a failed
+    // switch never actually interrupted the previous stream -- a
+    // rolled-back switch just costs one buffer refill.
+    clearHistory();
+    setZoomRange({ x: null, y: null });
+    setHCursors((c) => ({ ...c, enabled: false }));
+    setVCursors((c) => ({ ...c, enabled: false }));
+    setTimePerDivSec((prev) =>
+      nearestOption(TIME_PER_DIV_OPTIONS_BY_SOURCE[source] ?? TIME_PER_DIV_OPTIONS_BY_SOURCE.mock, prev),
+    );
     try {
       const result = await setScopeSource(source);
       if (!result.ok) {
@@ -650,27 +861,23 @@ export function ScopeView() {
   }
 
   function applyVoltsPerDiv(v: number) {
-    setFrozen(true);
-    // getCurrentYRange reads the plot's live scale directly rather than
-    // the throttled liveYRange state (updated only once per animation
-    // frame), same reasoning as the cursor toggles above. Unlike X --
-    // which had to go further and read xBufferRef directly, since a
-    // stale absolute timestamp can miss the buffer entirely -- Y values
-    // stay within the channel's bounded range, so this is enough.
-    const [min, max] = getCurrentYRange();
+    // Pins X too (freezing time), not just Y -- otherwise, since `frozen`
+    // is now derived from `zoomRange.x`, a Volts/div change would leave
+    // time free to keep sliding under a nominally "frozen" Y.
+    const { x, y } = freezeViewport();
+    const [min, max] = y;
     const center = (min + max) / 2;
     const half = (v * DIVS_Y) / 2;
-    setZoomRange((z) => ({ ...z, y: [center - half, center + half] }));
+    setZoomRange({ x, y: [center - half, center + half] });
   }
 
   const rangeOptions = RANGE_OPTIONS_BY_SOURCE[scopeSource] ?? RANGE_OPTIONS_BY_SOURCE.mock;
   const timePerDivOptions =
     TIME_PER_DIV_OPTIONS_BY_SOURCE[scopeSource] ?? TIME_PER_DIV_OPTIONS_BY_SOURCE.mock;
 
-  const effectiveXRange = zoomRange.x ?? liveXRange;
   const effectiveYRange = zoomRange.y ?? liveYRange;
-  const timePerDiv = nearestOption(timePerDivOptions, (effectiveXRange[1] - effectiveXRange[0]) / DIVS_X);
   const voltsPerDiv = nearestOption(VOLTS_PER_DIV_OPTIONS, (effectiveYRange[1] - effectiveYRange[0]) / DIVS_Y);
+  const frozen = zoomRange.x !== null;
 
   // The Hantek 1008C has a fixed ~4000-sample capture budget shared
   // evenly across active channels, independent of the timebase -- see
@@ -718,7 +925,7 @@ export function ScopeView() {
             {frozen ? "Resume live" : "Live"}
           </button>
           {!frozen && (
-            <button onClick={() => setFrozen(true)} title="Hold the trace to place cursors">
+            <button onClick={() => freezeViewport()} title="Hold the trace to place cursors">
               Freeze
             </button>
           )}
@@ -735,13 +942,31 @@ export function ScopeView() {
           <label>
             Time/div {timebaseBusy && "…"}
             <select
-              value={timePerDiv}
+              value={timePerDivSec}
               disabled={timebaseBusy}
               onChange={(e) => void applyTimePerDiv(Number(e.target.value))}
             >
               {timePerDivOptions.map((v) => (
                 <option key={v} value={v}>
                   {formatTimePerDiv(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            History
+            <select
+              value={historySeconds}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setHistorySeconds(next);
+                trimBuffers(next);
+                dirtyRef.current = true;
+              }}
+            >
+              {HISTORY_SECONDS_OPTIONS.map((s) => (
+                <option key={s} value={s}>
+                  {s}s
                 </option>
               ))}
             </select>
