@@ -221,6 +221,71 @@ host wants to buffer/record," not a fixed onboard limit.
   multi-point DC calibration design instead. Revisit an onboard
   reference generator later if convenient.
 
+## External triggering (planned, 2026-08-28 -- not yet built)
+
+**Design principle**: build hardware for the destination, build firmware
+in increments. These are two different axes, not in tension -- "start
+simple" applies to firmware complexity (prove threshold triggering
+before mask matching); it does *not* mean under-provisioning the
+hardware (trigger ADC speed/resolution, ring buffer sizing, timing
+infrastructure) such that it needs replacing once the firmware
+eventually gets more sophisticated. Pick the trigger ADC with the full
+end-goal below in mind, then build toward it in firmware steps that
+each stay usable and complete on their own.
+
+**Architecture decided so far**:
+- A dedicated, independently-clocked single-channel ADC for
+  triggering/sync -- not one of the 8 main AD7606 channels, and not a
+  simple analog comparator. Rationale: doesn't consume a main
+  measurement channel, runs on its own timing independent of the main
+  8-channel conversion cycle (faster trigger response than waiting on
+  a shared cycle), and being a real ADC (not just a comparator) keeps
+  all threshold/pattern logic in firmware rather than needing to build
+  that sophistication into analog hardware. Explicitly "almost a 9th
+  channel" (could be fully recorded as data later) but scoped for now
+  as trigger-only. Needs its own protection (TVS/ESD), sized to
+  whatever it's actually meant to see. Part not yet chosen -- send the
+  datasheet once picked for the same verification treatment as
+  everything else.
+- **Ring buffer for pre-trigger capture**: continuously buffer recent
+  samples from the 8 main channels even while waiting for a trigger, so
+  a captured event includes what led up to it, not just what came
+  after -- the standard real-oscilloscope trigger architecture, and
+  meaningfully more useful for diagnostics than post-trigger-only
+  capture (e.g. seeing a coil begin to arc before it fully discharges).
+
+**End-goal vision**: a "zone"/mask-style trigger, analogous to a
+camera's autofocus zone -- specify a tolerance region (not a single
+threshold) that a waveform must fall within to trigger, with hysteresis
+in *both* amplitude and timing/frequency (a percentage-wide tolerance
+band "bolding" the reference waveform above, below, and in time). This
+is a real, established test-equipment concept, usually called **mask
+testing** or waveform/template testing (used for eye-diagram/signal-
+qualification testing on high-end scopes) -- same mechanism, just
+triggering *on* conformance to the mask rather than flagging violation
+of it.
+
+**Incremental firmware roadmap toward that end goal** (each step a
+complete, usable capability on its own -- nothing gets thrown away
+climbing the ladder):
+1. Simple threshold/edge trigger (single level, single direction) --
+   first firmware increment once the trigger ADC is in hand.
+2. Timing-sequence trigger (a specific pattern of crossings within
+   timing windows, e.g. rising edge then falling edge within X-Y us
+   then another rising edge) -- first taste of the timing-tolerance
+   dimension, without needing continuous waveform correlation.
+3. Amplitude tolerance band -- trigger when the signal stays within a
+   percentage envelope around a reference level, rather than a single
+   hard threshold. The amplitude half of "bolding" on its own.
+4. Full 2D mask/zone trigger -- combine 3 with the timing dimension
+   from 2, giving the actual zone/region trigger described above.
+   Genuine continuous waveform-correlation/pattern-matching (comparing
+   live samples against a stored template) is a further step past this
+   if ever needed -- a real DSP problem (similarity metric, real-time
+   compute budget, false-positive/negative tuning), not a firmware
+   add-on, and only worth building if the mask/zone approach above
+   proves insufficient in practice.
+
 ## ADC choice: bench test on AD7606C-16, switch to AD7606C-18 for the final PCB
 
 Both datasheet-verified in full (`docs/datasheets/AD7606C-16.pdf`,
