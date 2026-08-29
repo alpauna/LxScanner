@@ -67,6 +67,7 @@ const DEFAULT_HISTORY_SECONDS = 5;
 // still trivially far below Hantek's real dead time (whose own dt is
 // similarly small).
 const GAP_THRESHOLD_DT_MULTIPLIER = 3;
+const PLAYBACK_SPEED_OPTIONS = [0.25, 0.5, 1, 2, 4];
 const SCOPE_SOURCE_LABELS: Record<string, string> = {
   mock: "Mock",
   hantek: "Hantek 1008C",
@@ -182,6 +183,55 @@ function lowerBound(sorted: number[], target: number): number {
   return lo;
 }
 
+// Appends one batch's samples into a buffer pair (the live rolling
+// buffer, or a capture accumulator -- both need the exact same
+// backwards-clock/gap-marker handling, so this is shared rather than
+// hand-duplicated, since duplicating it by copy-paste is exactly how a
+// sibling of the array-mutation/gap-threshold bugs already fixed once
+// this session would come back in a second buffer). Mutates and
+// returns `xs`/`buffers` -- the caller stores the result back into
+// whichever ref it came from, since a backwards-clock reset replaces
+// the arrays outright rather than mutating in place.
+function ingestBatch(
+  xs: number[],
+  buffers: Record<number, (number | null)[]>,
+  newXs: number[],
+  batch: { dt: number; channels: Record<string, number[]> },
+  nSamples: number,
+): { xs: number[]; buffers: Record<number, (number | null)[]> } {
+  // Timeline went backwards (stray backend-restart edge case -- a fresh
+  // process's monotonic clock starts small again): can't bridge it, so
+  // discard the old, now-incomparable history.
+  if (xs.length > 0 && newXs[0] < xs[xs.length - 1]) {
+    xs = [];
+    buffers = Object.fromEntries(Object.keys(buffers).map((k) => [Number(k), []]));
+  }
+
+  const lastX = xs.length ? xs[xs.length - 1] : null;
+  // Each burst-mode capture is a self-contained window, with real dead
+  // time before the next one for Hantek (USB/protocol overhead between
+  // captures -- see docs/hantek1008c.md); Teensy/Mock have no designed
+  // gap. Rather than replacing the buffer outright (which drew a
+  // straight line across that dead time, faking a ramp), insert one
+  // null marker -- uPlot's documented gap sentinel -- when the gap is
+  // real, then append into the rolling history. The marker goes into
+  // all 8 raw channel arrays (not just enabled ones), since
+  // buildSeriesData filters to enabled channels afterward and every
+  // array must stay the same length.
+  if (lastX !== null && newXs[0] - lastX > batch.dt * GAP_THRESHOLD_DT_MULTIPLIER) {
+    xs.push(lastX + 1e-9);
+    for (let ch = 0; ch < 8; ch++) buffers[ch].push(null);
+  }
+
+  appendAll(xs, newXs);
+  for (let ch = 0; ch < 8; ch++) {
+    const values = batch.channels[String(ch)] ?? new Array<null>(nSamples).fill(null);
+    appendAll(buffers[ch], values);
+  }
+
+  return { xs, buffers };
+}
+
 function formatTimePerDiv(v: number): string {
   const abs = Math.abs(v);
   if (abs < 1e-3) return `${(v * 1e6).toFixed(0)} µs/div`;
@@ -250,6 +300,55 @@ export function ScopeView() {
   const xBufferRef = useRef<number[]>([]);
   const dirtyRef = useRef(false);
   const tickCounterRef = useRef(0);
+
+  // Which buffer pair is on screen: the live rolling buffer, or a
+  // capture (in progress or loaded/finished). A genuinely separate axis
+  // of state from zoomRange/frozen -- capture data is a wholly different
+  // dataset, not just a pinned viewport into the live one.
+  const [viewSource, setViewSource] = useState<"live" | "capture">("live");
+  const viewSourceRef = useRef(viewSource);
+  viewSourceRef.current = viewSource;
+
+  // Capture accumulator: starting a capture seeds these from the live
+  // buffer's *current* contents (the lead-in), then every subsequent
+  // batch appends into both this and the live buffer via the same
+  // ingestBatch() helper. Never trimmed -- grows for the whole capture,
+  // bounded only by the user clicking Stop.
+  const captureXRef = useRef<number[]>([]);
+  const captureBuffersRef = useRef<Record<number, (number | null)[]>>(
+    Object.fromEntries(DEFAULT_CHANNELS.map((c) => [c.id, []])),
+  );
+  const [isCapturing, setIsCapturing] = useState(false);
+  const isCapturingRef = useRef(isCapturing);
+  isCapturingRef.current = isCapturing;
+  // Anchors driver-monotonic time to wall-clock at the moment Capture is
+  // pressed, using the live buffer's freshest sample as the reference --
+  // driver time alone (t0) has no fixed wall-clock relationship across
+  // sources (Hantek/Teensy use the backend process's time.monotonic(),
+  // Mock resets to 0 per instance), so this is what a future capture
+  // list / media-sync feature would need to show a real timestamp.
+  const captureAnchorRef = useRef<{ driverT: number; wallMs: number } | null>(null);
+  type CaptureMeta = {
+    id: string | null;
+    name: string;
+    source: string;
+    wallClockStartMs: number;
+    durationSec: number;
+  };
+  const [captureMeta, setCaptureMeta] = useState<CaptureMeta | null>(null);
+
+  // Playback transport. A loaded/finished capture is static, so unlike
+  // live rendering this never needs setData() -- it's pure
+  // plot.setScale() manipulation each frame, the same mechanism pan-drag
+  // already uses (panScaleXRef) and for the same reason: driving this
+  // through zoomRange/React state would rebuild the whole uPlot instance
+  // every frame (the plot-creation effect is keyed on zoomKey).
+  const [playing, setPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const playbackSpeedRef = useRef(playbackSpeed);
+  playbackSpeedRef.current = playbackSpeed;
+  const playbackScaleXRef = useRef<Range | null>(null);
+  const lastFrameTimeRef = useRef(0);
 
   const [channels, setChannels] = useState<ChannelConfig[]>(loadChannels);
   const channelsRef = useRef(channels);
@@ -358,22 +457,35 @@ export function ScopeView() {
     [zoomRange],
   );
 
+  // Picks the live rolling buffer or the capture buffer depending on
+  // viewSource -- the single point where "what data is on screen"
+  // branches, so every renderer/range function just calls these instead
+  // of each needing its own live/capture conditional.
+  function activeXBuffer(): number[] {
+    return viewSourceRef.current === "capture" ? captureXRef.current : xBufferRef.current;
+  }
+
+  function activeBuffers(): Record<number, (number | null)[]> {
+    return viewSourceRef.current === "capture" ? captureBuffersRef.current : buffersRef.current;
+  }
+
   function buildSeriesData(): uPlot.AlignedData {
     const visible = channelsRef.current.filter((c) => c.enabled);
-    // Always hand uPlot fresh array objects, never buffersRef.current's
-    // own arrays directly (even in the "no transform needed" fast path)
-    // -- ingestion now appends in place via .push() for performance
-    // (see the WS handler), rather than replacing the array wholesale
-    // like the old per-batch code did. uPlot's setData() likely does a
+    const buffers = activeBuffers();
+    // Always hand uPlot fresh array objects, never the source ref's own
+    // arrays directly (even in the "no transform needed" fast path) --
+    // ingestion appends in place via .push() for performance (see the
+    // WS handler), rather than replacing the array wholesale like the
+    // old per-batch code did. uPlot's setData() likely does a
     // reference-equality fast path internally; handing back the *same*
     // mutated-in-place array on a later call can make it think nothing
     // changed and skip reprocessing, even though the contents grew.
     const series = visible.map((c) =>
       c.attenuation === 1 && c.offset === 0
-        ? buffersRef.current[c.id].slice()
-        : buffersRef.current[c.id].map((v) => (v === null ? null : v * c.attenuation + c.offset)),
+        ? buffers[c.id].slice()
+        : buffers[c.id].map((v) => (v === null ? null : v * c.attenuation + c.offset)),
     );
-    return [xBufferRef.current.slice(), ...series] as unknown as uPlot.AlignedData;
+    return [activeXBuffer().slice(), ...series] as unknown as uPlot.AlignedData;
   }
 
   // Drops retained history older than `seconds` (relative to the newest
@@ -463,6 +575,12 @@ export function ScopeView() {
             // final position after a full drag matched the pre-drag
             // position exactly, with no net movement).
             if (panStartRef.current) return panScaleXRef.current ?? computeLiveXRange();
+            // Active playback: same reasoning as the pan branch above --
+            // live ingestion never stops even during playback (a loaded
+            // capture doesn't pause the live buffer), so its setData()
+            // calls would otherwise re-invoke this and yank the played-
+            // back position back toward zoomRange.x on every live batch.
+            if (playbackScaleXRef.current) return playbackScaleXRef.current;
             if (zoomRange.x) return zoomRange.x;
             // Live: slide a window of the desired Time/div width to
             // follow the newest retained sample, rather than trusting
@@ -603,36 +721,13 @@ export function ScopeView() {
       newXs[i] = batch.t0 + i * batch.dt;
     }
 
-    // Timeline went backwards (stray backend-restart edge case -- a
-    // fresh process's monotonic clock starts small again): can't bridge
-    // it, so discard the old, now-incomparable history.
-    const xs0 = xBufferRef.current;
-    if (xs0.length > 0 && newXs[0] < xs0[xs0.length - 1]) {
-      clearHistory();
-    }
-
-    const xs = xBufferRef.current;
-    const lastX = xs.length ? xs[xs.length - 1] : null;
-    // Each burst-mode capture is a self-contained window, with real dead
-    // time before the next one for Hantek (USB/protocol overhead between
-    // captures -- see docs/hantek1008c.md); Teensy/Mock have no designed
-    // gap. Rather than replacing the buffer outright (which drew a
-    // straight line across that dead time, faking a ramp), insert one
-    // null marker -- uPlot's documented gap sentinel -- when the gap is
-    // real, then append into the rolling history. The marker goes into
-    // all 8 raw channel arrays (not just enabled ones), since
-    // buildSeriesData filters to enabled channels afterward and every
-    // array must stay the same length.
-    if (lastX !== null && newXs[0] - lastX > batch.dt * GAP_THRESHOLD_DT_MULTIPLIER) {
-      xs.push(lastX + 1e-9);
-      for (let ch = 0; ch < 8; ch++) buffersRef.current[ch].push(null);
-    }
-
-    appendAll(xs, newXs);
-    for (let ch = 0; ch < 8; ch++) {
-      const values = batch.channels[String(ch)] ?? new Array<null>(nSamples).fill(null);
-      appendAll(buffersRef.current[ch], values);
-    }
+    // The live buffer always ingests, regardless of viewSource -- it
+    // must never stop growing in the background, since that's what
+    // makes going back to live from a capture a seamless pointer-swap
+    // rather than something that needs to bridge a gap.
+    const live = ingestBatch(xBufferRef.current, buffersRef.current, newXs, batch, nSamples);
+    xBufferRef.current = live.xs;
+    buffersRef.current = live.buffers;
 
     // Skip trimming while frozen: the pinned viewport can be anywhere in
     // the buffer, and trimming purely relative to "now" would eventually
@@ -643,7 +738,19 @@ export function ScopeView() {
     // still keeps running so nothing is missed; resumeLive() re-imposes
     // the bound in one catch-up trim once the pin is released.
     if (zoomRange.x === null) trimBuffers(historySecondsRef.current);
-    dirtyRef.current = true;
+
+    // An active capture also gets every batch appended (never trimmed --
+    // it grows for the whole capture, bounded only by Stop).
+    if (isCapturingRef.current) {
+      const cap = ingestBatch(captureXRef.current, captureBuffersRef.current, newXs, batch, nSamples);
+      captureXRef.current = cap.xs;
+      captureBuffersRef.current = cap.buffers;
+    }
+
+    // Only redraw if the live buffer is actually what's on screen --
+    // otherwise every live batch triggers a wasted setData() against a
+    // buffer that isn't even being viewed while looking at a capture.
+    if (viewSourceRef.current === "live") dirtyRef.current = true;
   });
 
   useEffect(() => {
@@ -672,6 +779,91 @@ export function ScopeView() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
+
+  // Playback: pure plot.setScale() manipulation, no setData() needed
+  // (a loaded/finished capture is static -- see buildSeriesData/
+  // activeXBuffer). Runs its own rAF loop only while playing, mirroring
+  // the render tick above structurally but never touching series data.
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    lastFrameTimeRef.current = performance.now();
+    const tick = () => {
+      const plot = plotRef.current;
+      const xs = captureXRef.current;
+      const current = playbackScaleXRef.current;
+      const now = performance.now();
+      const advance = ((now - lastFrameTimeRef.current) / 1000) * playbackSpeedRef.current;
+      lastFrameTimeRef.current = now;
+      if (!plot || !current || xs.length === 0) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      const [min, max] = current;
+      const width = max - min;
+      const captureEnd = xs[xs.length - 1];
+      let newMin = min + advance;
+      let newMax = max + advance;
+      if (newMax >= captureEnd) {
+        // Reached the end -- clamp, auto-pause, commit into zoomRange so
+        // cursors/Zoom-to-cursors/Volts-div (which all read zoomRange,
+        // not a live ref) keep working unmodified once paused. Update
+        // the ref *before* calling setScale (same fix as scrubTo's
+        // commit path above) -- calling setScale after nulling it would
+        // make range() fall back to the still-stale zoomRange.x instead
+        // of the clamped end position.
+        newMax = captureEnd;
+        newMin = captureEnd - width;
+        playbackScaleXRef.current = [newMin, newMax];
+        plot.setScale("x", { min: newMin, max: newMax });
+        setPlaying(false);
+        setZoomRange((z) => ({ ...z, x: [newMin, newMax] }));
+        playbackScaleXRef.current = null;
+        return;
+      }
+      playbackScaleXRef.current = [newMin, newMax];
+      plot.setScale("x", { min: newMin, max: newMax });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+
+  function startPlayback() {
+    if (viewSourceRef.current !== "capture") return;
+    playbackScaleXRef.current = zoomRange.x ?? getCurrentXRange();
+    setPlaying(true);
+  }
+
+  // Stopping mid-playback commits the current position into zoomRange
+  // (same reasoning as reaching the end above) rather than leaving it
+  // only in the ref, so the paused view stays exactly where playback
+  // left it and every zoomRange-reading control keeps working.
+  function pausePlayback() {
+    setPlaying(false);
+    const pos = playbackScaleXRef.current;
+    if (pos) setZoomRange((z) => ({ ...z, x: pos }));
+    playbackScaleXRef.current = null;
+  }
+
+  // Commits on every change -- a real "preview without rebuilding, commit
+  // once on release" would need onInput/onChange to actually mean
+  // different things, but React's synthetic onChange for range/text
+  // inputs fires on the native `input` event, not `change` (confirmed
+  // live: both handlers fired together on every tick, so the intended
+  // preview-vs-commit split never took effect, and calling setScale()
+  // directly right before an immediate commit-driven rebuild raced with
+  // it, always snapping back to the pre-scrub window -- the same
+  // ordering bug already fixed once for pan-drag, reproduced here in a
+  // second spot with a different trigger). Just commit every time,
+  // matching every other zoomRange-driven control in this file (Volts/
+  // div, Reset zoom) -- one uPlot rebuild per scrub tick is consistent
+  // with the rest of the app's existing behavior, not a regression.
+  function scrubTo(newMin: number) {
+    const [curMin, curMax] = zoomRange.x ?? getCurrentXRange();
+    const width = curMax - curMin;
+    setZoomRange((z) => ({ ...z, x: [newMin, newMin + width] }));
+  }
 
   function updateChannel(id: number, patch: Partial<ChannelConfig>) {
     setChannels((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -800,10 +992,26 @@ export function ScopeView() {
   }
 
   function resetZoom() {
+    // While viewing a capture, "reset" means "show the whole bounded
+    // capture" -- nulling zoomRange.x would silently go live while still
+    // rendering capture data (axis/series would disagree), the same
+    // class of bug fixed for resumeLive/applySource below.
+    if (viewSourceRef.current === "capture") {
+      const xs = captureXRef.current;
+      setZoomRange((z) => ({ ...z, x: xs.length ? [xs[0], xs[xs.length - 1]] : null }));
+      return;
+    }
     setZoomRange({ x: null, y: null });
   }
 
   function resumeLive() {
+    // Should never fire while viewing a capture -- gated out of the UI
+    // (replaced by a "Back to live" control), but delegate defensively
+    // in case both ever end up wired to the same shortcut later.
+    if (viewSourceRef.current === "capture") {
+      exitCaptureView();
+      return;
+    }
     setPanMode(false);
     setHCursors((c) => ({ ...c, enabled: false }));
     setVCursors((c) => ({ ...c, enabled: false }));
@@ -812,6 +1020,63 @@ export function ScopeView() {
     // otherwise a long pause leaves the buffer over-grown until enough
     // new data organically arrives to trigger the next trim.
     trimBuffers(historySecondsRef.current);
+  }
+
+  // Switches which buffer is on screen. Entering capture view pins the
+  // viewport explicitly (rather than defaulting to an auto-fit of the
+  // whole capture) so callers control exactly what's shown -- stopCapture
+  // below uses this to seed the *exact* live position that was just on
+  // screen, which is what makes Capture -> Stop feel seamless rather than
+  // jumping to some other default view.
+  function enterCaptureView(xRange: Range, yRange: Range) {
+    setPlaying(false);
+    playbackScaleXRef.current = null;
+    setViewSource("capture");
+    setZoomRange({ x: xRange, y: yRange });
+    dirtyRef.current = true;
+  }
+
+  // The live buffer never stopped growing in the background while a
+  // capture was being viewed (see the WS handler), so this is a pure
+  // pointer-swap back to it -- no splicing needed, there's no
+  // discontinuity to bridge.
+  function exitCaptureView() {
+    setPlaying(false);
+    playbackScaleXRef.current = null;
+    setViewSource("live");
+    setZoomRange({ x: null, y: null });
+  }
+
+  function startCapture() {
+    captureXRef.current = xBufferRef.current.slice();
+    captureBuffersRef.current = Object.fromEntries(
+      Object.entries(buffersRef.current).map(([ch, arr]) => [Number(ch), arr.slice()]),
+    );
+    const driverT = xBufferRef.current[xBufferRef.current.length - 1] ?? 0;
+    captureAnchorRef.current = { driverT, wallMs: Date.now() };
+    setCaptureMeta(null);
+    setIsCapturing(true);
+  }
+
+  function stopCapture() {
+    setIsCapturing(false);
+    const xs = captureXRef.current;
+    const anchor = captureAnchorRef.current;
+    const wallClockStartMs = anchor
+      ? anchor.wallMs - (anchor.driverT - (xs[0] ?? anchor.driverT)) * 1000
+      : Date.now();
+    const durationSec = xs.length > 1 ? xs[xs.length - 1] - xs[0] : 0;
+    setCaptureMeta({
+      id: null,
+      name: `Capture ${new Date().toLocaleString()}`,
+      source: scopeSource,
+      wallClockStartMs,
+      durationSec,
+    });
+    // Read the live position *before* switching viewSource -- this is
+    // the seamless-transition fix: seed the capture's initial viewport
+    // at exactly what was already on screen, not an auto-fit default.
+    enterCaptureView(getCurrentXRange(), getCurrentYRange());
   }
 
   // Sets the desired live-window width. For Hantek this also reconfigures
@@ -830,8 +1095,19 @@ export function ScopeView() {
     setTimebaseBusy(true);
     try {
       setTimePerDivSec(v);
-      if (scopeSource !== "teensy") await setTimebase(Math.round(v * 1e9));
-      setZoomRange((z) => ({ ...z, x: null }));
+      if (viewSourceRef.current === "capture") {
+        // Static capture -- there's no hardware window to reconfigure,
+        // and no live view to hand control to. Just resize the current
+        // view around its own center, mirroring applyVoltsPerDiv's
+        // center/half-span math for Y below.
+        const [min, max] = getCurrentXRange();
+        const center = (min + max) / 2;
+        const half = (v * DIVS_X) / 2;
+        setZoomRange((z) => ({ ...z, x: [center - half, center + half] }));
+      } else {
+        if (scopeSource !== "teensy") await setTimebase(Math.round(v * 1e9));
+        setZoomRange((z) => ({ ...z, x: null }));
+      }
     } finally {
       setTimebaseBusy(false);
     }
@@ -864,6 +1140,12 @@ export function ScopeView() {
     setZoomRange({ x: null, y: null });
     setHCursors((c) => ({ ...c, enabled: false }));
     setVCursors((c) => ({ ...c, enabled: false }));
+    // Switching physical instruments while paused on an old capture
+    // should always kick back to live -- otherwise the newly-cleared
+    // live buffer and the still-displayed capture data would disagree
+    // about what's on screen (the same class of bug as resetZoom/
+    // resumeLive above).
+    setViewSource("live");
     setTimePerDivSec((prev) =>
       nearestOption(TIME_PER_DIV_OPTIONS_BY_SOURCE[source] ?? TIME_PER_DIV_OPTIONS_BY_SOURCE.mock, prev),
     );
@@ -930,7 +1212,9 @@ export function ScopeView() {
             Source {sourceBusy && "…"}
             <select
               value={scopeSource}
-              disabled={sourceBusy}
+              // A mid-capture or mid-capture-view source switch would
+              // silently splice two physical instruments' data together.
+              disabled={sourceBusy || isCapturing || viewSource === "capture"}
               onChange={(e) => void applySource(e.target.value)}
             >
               {availableSources.map((s) => (
@@ -940,21 +1224,67 @@ export function ScopeView() {
               ))}
             </select>
           </label>
-          <button onClick={resumeLive} disabled={!frozen}>
-            {frozen ? "Resume live" : "Live"}
-          </button>
-          {!frozen && (
-            <button onClick={() => freezeViewport()} title="Hold the trace to place cursors">
-              Freeze
-            </button>
+          {viewSource === "live" ? (
+            <>
+              <button onClick={resumeLive} disabled={!frozen}>
+                {frozen ? "Resume live" : "Live"}
+              </button>
+              {!frozen && (
+                <button onClick={() => freezeViewport()} title="Hold the trace to place cursors">
+                  Freeze
+                </button>
+              )}
+              <button
+                onClick={() => setPanMode((p) => !p)}
+                className={panMode ? "scope-pan-active" : ""}
+                title="Drag the view around to follow the captured data"
+              >
+                ✋ Pan
+              </button>
+              {isCapturing ? (
+                <button
+                  onClick={stopCapture}
+                  className="scope-capture-active"
+                  title="Stop capturing and switch to viewing what was captured"
+                >
+                  ⏹ Stop Capture
+                </button>
+              ) : (
+                <button
+                  onClick={startCapture}
+                  title="Capture the buffer already on screen plus everything from now until you stop"
+                >
+                  ● Capture
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <button onClick={exitCaptureView} title="Discard the capture view and return to the live stream">
+                ← Back to live
+              </button>
+              <button
+                onClick={() => setPanMode((p) => !p)}
+                className={panMode ? "scope-pan-active" : ""}
+                title="Drag the view around to scrub through the capture"
+              >
+                ✋ Pan
+              </button>
+              <button onClick={() => (playing ? pausePlayback() : startPlayback())}>
+                {playing ? "⏸ Pause" : "▶ Play"}
+              </button>
+              <label>
+                Speed
+                <select value={playbackSpeed} onChange={(e) => setPlaybackSpeed(Number(e.target.value))}>
+                  {PLAYBACK_SPEED_OPTIONS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}x
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
           )}
-          <button
-            onClick={() => setPanMode((p) => !p)}
-            className={panMode ? "scope-pan-active" : ""}
-            title="Drag the view around to follow the captured data"
-          >
-            ✋ Pan
-          </button>
         </div>
 
         <div className="scope-scale-controls">
@@ -972,24 +1302,26 @@ export function ScopeView() {
               ))}
             </select>
           </label>
-          <label>
-            History
-            <select
-              value={historySeconds}
-              onChange={(e) => {
-                const next = Number(e.target.value);
-                setHistorySeconds(next);
-                trimBuffers(next);
-                dirtyRef.current = true;
-              }}
-            >
-              {HISTORY_SECONDS_OPTIONS.map((s) => (
-                <option key={s} value={s}>
-                  {s}s
-                </option>
-              ))}
-            </select>
-          </label>
+          {viewSource === "live" && (
+            <label>
+              History
+              <select
+                value={historySeconds}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setHistorySeconds(next);
+                  trimBuffers(next);
+                  dirtyRef.current = true;
+                }}
+              >
+                {HISTORY_SECONDS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}s
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label>
             Volts/div
             <select
@@ -1005,7 +1337,33 @@ export function ScopeView() {
           </label>
         </div>
 
-        {scopeSource === "hantek" && (
+        {viewSource === "capture" &&
+          captureXRef.current.length > 0 &&
+          (() => {
+            const captureStart = captureXRef.current[0];
+            const captureEnd = captureXRef.current[captureXRef.current.length - 1];
+            const [curMin, curMax] = zoomRange.x ?? [captureStart, captureEnd];
+            const scrubMax = Math.max(captureEnd - (curMax - curMin), captureStart);
+            return (
+              <div className="scope-scrub-controls">
+                <input
+                  type="range"
+                  min={captureStart}
+                  max={scrubMax}
+                  step={(captureEnd - captureStart) / 1000 || 1}
+                  value={Math.min(curMin, scrubMax)}
+                  onChange={(e) => scrubTo(Number(e.currentTarget.value))}
+                />
+                {captureMeta && (
+                  <span className="scope-readout">
+                    {captureMeta.name} -- {captureMeta.durationSec.toFixed(2)}s
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
+        {scopeSource === "hantek" && viewSource === "live" && (
           <div
             className={`scope-resolution-note ${
               estSamplesPerDiv < 20 ? "scope-res-bad" : estSamplesPerDiv < 50 ? "scope-res-marginal" : ""
