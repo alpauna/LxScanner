@@ -286,6 +286,86 @@ climbing the ladder):
    add-on, and only worth building if the mask/zone approach above
    proves insufficient in practice.
 
+### Trigger ADC: ADS8861, and its input protection network
+
+**Part chosen (2026-08-28)**: `ADS8861IDGS` (Texas Instruments), 16-bit,
+1MSPS, true-differential SAR ADC. Picked over two other candidates
+after working through real trade-offs:
+- **AD7980** (Analog Devices): fast (1MSPS) and easy package (MSOP-10),
+  but pseudo-differential unipolar 0V-to-V<sub>REF</sub> input only --
+  didn't meet the bipolar requirement.
+- **AD7682/AD7689** (Analog Devices): genuine bipolar mode
+  (-V<sub>REF</sub>/2 to +V<sub>REF</sub>/2), and a bonus -- built-in
+  4-/8-channel MUX and sequencer, real room to grow into multiple
+  trigger/aux channels later. But only available in LFCSP/WLCSP (no
+  MSOP option), a real step down in hand-assembly friendliness, plus a
+  4x slower 250kSPS max.
+- **ADS8861**: solved all three at once -- true-differential input with
+  a *wider* usable range than AD7682's fixed bipolar mode (per the
+  datasheet's own diagram: a much larger diamond-shaped input space
+  than a "traditional" differential ADC, with a wide 0V-to-V<sub>REF</sub>
+  common-mode range independent of the differential signal), MSOP-10
+  package confirmed via the `DGS` package suffix (same hand-assembly
+  friendliness as AD7980), and full 1MSPS speed (no compromise vs.
+  AD7980). No architecture gives up anything here except AD7682's
+  built-in multi-channel MUX, which isn't needed for the current
+  trigger-only scope.
+
+**Input protection network**, assuming V<sub>REF</sub>=2.5V (adjust
+values if a different reference voltage is chosen):
+
+The base datasheet gives only a voltage-only absolute max (-0.3V to
+V<sub>REF</sub>+0.3V) with no stated current tolerance -- a real gap
+compared to AD7980/AD7682, which both explicitly rated their internal
+clamp diodes at ±130mA. Resolved by TI's own application note,
+*"Circuit for Protecting Low-Voltage SAR ADC From Electrical Overstress
+With Minimal Impact on Performance"* (SBAA372A), written for the
+sibling part ADS8860 (same family, same input structure): confirms the
+internal ESD diodes tolerate **±10mA continuous**, and provides a
+complete worked reference design, validated on real hardware with
+*better* AC performance than the ADC's own typical spec (measured SNR
+93.3dB / THD -113.7dB vs. typical 92dB / -108dB) -- proof that a
+correctly-sized protection network costs nothing in measurement
+quality.
+
+Combining that reference design's methodology with this project's
+existing 3-stage main-channel philosophy (since TI's example assumes a
+benign +-12V op-amp fault, not a genuine automotive coil-discharge
+event):
+1. **Front TVS**: reuse the same SMCJ-class bidirectional TVS as the
+   main AD7606 channels (~33-36V standoff, 1500W peak-pulse-power
+   class) -- absorbs the bulk of a real transient's energy, clamping a
+   fault to roughly 45-55V residual.
+2. **R1 = 10kOhm**, between the TVS and the local clamp diodes, sized
+   against the confirmed ±10mA rating: (50V - 2.9V)/10kOhm ~= 4.7mA,
+   about 47% of the limit -- comparable margin to the main channels'
+   own protection network. Same 1210 case size for pulse-energy
+   survivability.
+3. **Local Schottky clamp diodes** (BAT54-class, per TI's reference):
+   chosen for low forward voltage (~0.3-0.42V), low leakage, and
+   *low capacitance* -- diode capacitance is nonlinear with voltage and
+   can introduce distortion if too high, a real AC-performance
+   consideration beyond just clamping. D1 to REF (or a buffered copy),
+   D2 to GND.
+4. **Rfilt = 15Ohm**, right at the ADC pins -- TI's own optimized value
+   for this exact 1MSPS SAR family (their calculated minimum was
+   12Ohm, tuned up via simulation for best settling). Reused directly
+   rather than re-derived, since it's already validated on real
+   hardware on the same ADC family. Does double duty: final protection
+   margin, and settling the SAR ADC's own switched-capacitor sampling
+   kickback (a real requirement independent of protection).
+
+Verified via TI's own formula: R<sub>filt</sub> > (V<sub>ADC_in_min</sub>
+- V<sub>fD2</sub>) / I<sub>ADC_in_max</sub> = (-0.3V - (-0.42V))/10mA
+~= 12Ohm minimum -- 15Ohm clears this with margin, matching TI's own
+result exactly.
+
+**Not yet addressed**: if the real trigger source signal is larger than
+ADS8861's native +-V<sub>REF</sub> window (likely, for a genuine
+automotive signal), an attenuator ahead of this whole network is a
+separate design step, sized against the actual intended trigger source
+amplitude -- not yet decided.
+
 ## ADC choice: bench test on AD7606C-16, switch to AD7606C-18 for the final PCB
 
 Both datasheet-verified in full (`docs/datasheets/AD7606C-16.pdf`,
