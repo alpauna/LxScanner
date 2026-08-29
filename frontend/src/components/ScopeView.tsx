@@ -651,7 +651,13 @@ export function ScopeView() {
 
   function applyVoltsPerDiv(v: number) {
     setFrozen(true);
-    const [min, max] = zoomRange.y ?? liveYRange;
+    // getCurrentYRange reads the plot's live scale directly rather than
+    // the throttled liveYRange state (updated only once per animation
+    // frame), same reasoning as the cursor toggles above. Unlike X --
+    // which had to go further and read xBufferRef directly, since a
+    // stale absolute timestamp can miss the buffer entirely -- Y values
+    // stay within the channel's bounded range, so this is enough.
+    const [min, max] = getCurrentYRange();
     const center = (min + max) / 2;
     const half = (v * DIVS_Y) / 2;
     setZoomRange((z) => ({ ...z, y: [center - half, center + half] }));
