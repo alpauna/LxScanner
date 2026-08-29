@@ -1,18 +1,37 @@
-/* Phase 1 bring-up: AD7606C-16 basic SPI comms over the Teensy 4.1.
+/* Phase 2: AD7606C-16 binary streaming over USB Serial.
  *
- * Hardware mode, single DOUTA serial line -- confirmed from the
- * datasheet that all 8 channels can still be read this way ("all
- * channels can be read from DOUTA by providing eight 16-bit SPI
- * frames between two CONVST pulses"). Wiring matches
- * docs/teensy_daq.md's Phase 0 wiring table exactly.
+ * CONVST/BUSY/SPI-read logic is unchanged from Phase 1 bring-up
+ * (bench-validated 2026-08-27/28 against a known +/-1.24V reference
+ * signal, SPI_MODE0 confirmed correct). This phase replaces the
+ * human-readable, throttled debug print with a real streaming wire
+ * protocol so the backend (TeensyDaqDriver) can consume it as a scope
+ * source -- see docs/teensy_daq.md Phase 2.
  *
- * SPI mode: CONFIRMED SPI_MODE0 against a known +/-1.24V reference
- * signal (2026-08-27) -- reads +1.165V/-1.197V, within a few percent
- * of true (expected without offset/gain calibration). The original
- * SPI_MODE1 guess gave a consistent ~1.9-2x scaling error -- a wrong
- * CPHA shifts every sampled bit by one clock edge, which is
- * mathematically a x2/div2 error, matching exactly what was observed
- * (smooth, stable, repeatable, but wrong -- not random garbage).
+ * Frame format (all multi-byte fields little-endian, matching the
+ * Cortex-M7's native byte order -- written explicitly byte-by-byte
+ * below rather than relying on struct packing):
+ *   SYNC        4 bytes   0xA5 0x5A 0xA5 0x5A
+ *   N_SAMPLES   uint16    samples per channel in this frame
+ *   DT_US       uint32    microseconds between samples
+ *   DATA        N_SAMPLES * 8 * int16, raw ADC codes (backend converts
+ *               to volts -- keeps hardware-specific scaling out of the
+ *               wire format, same spirit as the Hantek driver keeping
+ *               its correction factors out of its own raw USB reads)
+ *   CHECKSUM    uint8     XOR of every byte from N_SAMPLES through DATA
+ *
+ * Command protocol (single bytes from the host over the same Serial
+ * connection, checked non-blockingly each loop iteration):
+ *   'S'         start streaming (default state is stopped, so a host
+ *               script never has to race the very first bytes after
+ *               USB enumeration)
+ *   'X'         stop streaming
+ *   'R' + 1     set RANGE pin (0 = +/-5V, 1 = +/-10V) -- takes effect
+ *               on the next batch boundary, not mid-batch. Hardware
+ *               mode only supports one range shared across all 8
+ *               channels, not truly per-channel -- see
+ *               TeensyDaqDriver.set_channel_range's docstring for how
+ *               the ScopeDriver interface's per-channel signature maps
+ *               onto this.
  */
 #include <Arduino.h>
 #include <SPI.h>
@@ -32,10 +51,6 @@ constexpr int PIN_OS1 = 20;
 constexpr int PIN_OS2 = 21;
 constexpr int PIN_RANGE = 22;
 
-// RANGE pin low = +/-5V single-ended (hardware mode, Table 10). Change
-// PIN_RANGE's setup() level and this LSB together if you switch range.
-constexpr float LSB_VOLTS = 152.58e-6f;  // +/-5V range, 16-bit
-
 // Timing, from the AD7606C-16 datasheet (Table 3, Reset Functionality):
 // full reset needs RESET held high >=3.2us, then >=274us before the
 // first CONVST. Padded with margin since none of this is timing-critical
@@ -43,13 +58,26 @@ constexpr float LSB_VOLTS = 152.58e-6f;  // +/-5V range, 16-bit
 constexpr uint32_t RESET_PULSE_US = 10;
 constexpr uint32_t RESET_SETTLE_US = 400;
 
-// SPI clock: starting conservative (datasheet allows up to 63.5MHz at
-// VDRIVE=3.3V) since this is dead-bug/flying-wire wiring on a breadboard-
-// style bring-up board, not a clean PCB trace. Raise once basic reads are
-// confirmed clean.
-constexpr uint32_t SPI_CLOCK_HZ = 1'000'000;
+// SPI clock: raised from Phase 1's conservative 1MHz now that the
+// dead-bug/flying-wire wiring has proven stable over real bench testing.
+// Still well under the datasheet's 63.5MHz max -- this is a cautious
+// step, not a jump to the ceiling, since this isn't a finished PCB.
+// Re-validate against the known reference signal if raised further.
+constexpr uint32_t SPI_CLOCK_HZ = 8'000'000;
 
 SPISettings spiSettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0);
+
+// Samples per channel per frame. At ~8MHz SPI, one 8-channel read takes
+// roughly 17-18us (8 transfers x 2us + CS/loop overhead), so 128 samples
+// is ~2.3ms per frame -- a responsive ~400+ frames/sec without excessive
+// per-frame USB overhead. Tune once real throughput is measured on the
+// backend side.
+constexpr uint16_t SAMPLES_PER_FRAME = 128;
+
+constexpr uint8_t SYNC_BYTES[4] = {0xA5, 0x5A, 0xA5, 0x5A};
+
+int16_t g_frameBuffer[SAMPLES_PER_FRAME][8];
+bool g_streaming = false;
 
 void pulseConvst() {
   digitalWriteFast(PIN_CONVST, LOW);
@@ -74,8 +102,9 @@ bool waitForConversion() {
 // per the datasheet's hardware-mode single-DOUTx-line requirement:
 // "these 128 SCLK cycles must be framed in groups of 16 SCLK cycles by
 // the CS signal" -- CS must toggle between each channel, not stay low
-// for one continuous 128-clock burst.
-void readAllChannels(int16_t (&out)[8]) {
+// for one continuous 128-clock burst. Returns false if FRSTDATA didn't
+// confirm frame alignment on channel 1.
+bool readAllChannels(int16_t (&out)[8]) {
   SPI.beginTransaction(spiSettings);
   bool sawFrstData = false;
   for (int ch = 0; ch < 8; ch++) {
@@ -85,16 +114,75 @@ void readAllChannels(int16_t (&out)[8]) {
     digitalWriteFast(PIN_CS, HIGH);
   }
   SPI.endTransaction();
-  if (!sawFrstData) {
-    Serial.println("WARN: FRSTDATA did not read high during channel 1 -- "
-                    "frame alignment may be off");
+  return sawFrstData;
+}
+
+void setRange(uint8_t rangeSel) {
+  // 0 = +/-5V single-ended, 1 = +/-10V single-ended (Table 10).
+  digitalWriteFast(PIN_RANGE, rangeSel ? HIGH : LOW);
+  delayMicroseconds(100);  // ~80us settling time per the datasheet, padded
+}
+
+// Non-blocking: processes any command bytes waiting on Serial without
+// stalling acquisition. Safe to call once per loop iteration.
+void handleCommands() {
+  while (Serial.available() > 0) {
+    int b = Serial.read();
+    switch (b) {
+      case 'S':
+        g_streaming = true;
+        break;
+      case 'X':
+        g_streaming = false;
+        break;
+      case 'R': {
+        uint32_t start = millis();
+        while (Serial.available() == 0) {
+          if (millis() - start > 100) return;  // malformed command, drop it
+        }
+        setRange(static_cast<uint8_t>(Serial.read()));
+        break;
+      }
+      default:
+        break;  // unknown byte, ignore
+    }
   }
+}
+
+void sendFrame(uint16_t nSamples, uint32_t dtUs) {
+  uint8_t checksum = 0;
+
+  Serial.write(SYNC_BYTES, 4);
+
+  uint8_t header[6];
+  header[0] = static_cast<uint8_t>(nSamples & 0xFF);
+  header[1] = static_cast<uint8_t>((nSamples >> 8) & 0xFF);
+  header[2] = static_cast<uint8_t>(dtUs & 0xFF);
+  header[3] = static_cast<uint8_t>((dtUs >> 8) & 0xFF);
+  header[4] = static_cast<uint8_t>((dtUs >> 16) & 0xFF);
+  header[5] = static_cast<uint8_t>((dtUs >> 24) & 0xFF);
+  for (uint8_t b : header) checksum ^= b;
+  Serial.write(header, sizeof(header));
+
+  for (uint16_t i = 0; i < nSamples; i++) {
+    for (int ch = 0; ch < 8; ch++) {
+      uint16_t raw = static_cast<uint16_t>(g_frameBuffer[i][ch]);
+      uint8_t lo = static_cast<uint8_t>(raw & 0xFF);
+      uint8_t hi = static_cast<uint8_t>((raw >> 8) & 0xFF);
+      checksum ^= lo;
+      checksum ^= hi;
+      Serial.write(lo);
+      Serial.write(hi);
+    }
+  }
+
+  Serial.write(checksum);
 }
 
 }  // namespace
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);  // baud is ignored over native USB CDC-ACM
 
   pinMode(PIN_CONVST, OUTPUT);
   pinMode(PIN_RESET, OUTPUT);
@@ -115,8 +203,7 @@ void setup() {
   digitalWriteFast(PIN_OS1, LOW);
   digitalWriteFast(PIN_OS2, LOW);
 
-  // +/-5V single-ended (Table 10). Matches LSB_VOLTS above.
-  digitalWriteFast(PIN_RANGE, LOW);
+  setRange(0);  // +/-5V single-ended default, matches Phase 1
 
   SPI.begin();
 
@@ -125,39 +212,36 @@ void setup() {
   delayMicroseconds(RESET_PULSE_US);
   digitalWriteFast(PIN_RESET, LOW);
   delayMicroseconds(RESET_SETTLE_US);
-
-  Serial.println("AD7606C-16 Phase 1 bring-up -- internal reference, "
-                  "+/-5V range, no oversampling");
 }
 
 void loop() {
-  static uint32_t lastPrint = 0;
-  int16_t channels[8];
-
-  pulseConvst();
-  bool ok = waitForConversion();
-  if (!ok) {
-    Serial.println("ERROR: BUSY did not fall within timeout -- check "
-                    "wiring/RESET/CONVST");
-    delay(500);
+  handleCommands();
+  if (!g_streaming) {
     return;
   }
-  readAllChannels(channels);
 
-  // Print at a human-readable rate, not every conversion -- this is
-  // bring-up validation, not the real streaming path.
-  if (millis() - lastPrint >= 200) {
-    lastPrint = millis();
-    for (int ch = 0; ch < 8; ch++) {
-      float volts = channels[ch] * LSB_VOLTS;
-      Serial.print("V");
-      Serial.print(ch + 1);
-      Serial.print("=");
-      Serial.print(volts, 4);
-      Serial.print("V (");
-      Serial.print(channels[ch]);
-      Serial.print(") ");
+  uint32_t frameStart = micros();
+  uint16_t collected = 0;
+  bool frstDataOk = true;
+
+  while (collected < SAMPLES_PER_FRAME) {
+    pulseConvst();
+    if (!waitForConversion()) {
+      // Conversion timeout mid-frame -- drop this frame's progress and
+      // let the host notice via a gap in timestamps rather than send a
+      // partial/misleading frame.
+      handleCommands();
+      if (!g_streaming) return;
+      continue;
     }
-    Serial.println();
+    frstDataOk &= readAllChannels(g_frameBuffer[collected]);
+    collected++;
   }
+
+  uint32_t frameElapsedUs = micros() - frameStart;
+  uint32_t dtUs = frameElapsedUs / SAMPLES_PER_FRAME;
+  (void)frstDataOk;  // TODO: surface frame-alignment faults to the host
+                      // once the backend has a place to report them
+
+  sendFrame(collected, dtUs);
 }

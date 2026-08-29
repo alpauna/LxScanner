@@ -14,6 +14,7 @@ dependencies = [
 scope = [
     "pyusb>=1.2.1",
     "overrides>=7.7.0",
+    "pyserial>=3.5",
 ]
 obd = [
     "python-obd>=0.7.1",

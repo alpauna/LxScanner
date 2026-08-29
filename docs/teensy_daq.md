@@ -207,6 +207,21 @@ host wants to buffer/record," not a fixed onboard limit.
   where useful.
 
 ### Phase 2 (backend integration)
+- **Firmware rewritten for binary streaming, 2026-08-29** -- Phase 1's
+  human-readable ~5Hz text print replaced with a real wire protocol
+  (4-byte sync + sample count + us/sample + raw int16 codes for all 8
+  channels + XOR checksum), streamed continuously rather than
+  throttled. SPI clock raised from Phase 1's conservative 1MHz to 8MHz
+  now that the dead-bug wiring has proven stable. CONVST/BUSY/SPI-read
+  logic itself unchanged from the bench-validated Phase 1 code.
+  Bench-verified with a standalone script against the same known
+  +/-1.24V reference signal: zero checksum failures, dt_us=22 achieved
+  (~45.4kHz effective simultaneous per-channel rate), and individual
+  frames now show real waveform transition edges within a single
+  frame (e.g. a captured rising/falling edge mid-frame) -- a
+  qualitative jump from Phase 1's single-point-per-print snapshots,
+  since 45kHz sampling a 1kHz signal resolves real shape, not just
+  aliased points.
 - Finalize the wire protocol based on what Phase 1 actually measured.
 - New `backend/app/scope/teensydaq/driver.py` implementing `ScopeDriver`
   (`connect`, `disconnect`, `configure_channels`, `set_channel_range`,
