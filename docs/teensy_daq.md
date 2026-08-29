@@ -360,11 +360,50 @@ Verified via TI's own formula: R<sub>filt</sub> > (V<sub>ADC_in_min</sub>
 ~= 12Ohm minimum -- 15Ohm clears this with margin, matching TI's own
 result exactly.
 
-**Not yet addressed**: if the real trigger source signal is larger than
-ADS8861's native +-V<sub>REF</sub> window (likely, for a genuine
-automotive signal), an attenuator ahead of this whole network is a
-separate design step, sized against the actual intended trigger source
-amplitude -- not yet decided.
+### Attenuation
+
+Trigger source signals are the same class as the main 8 channels
+(automotive signals up to tens of volts) -- confirmed the same
+convention already used there applies here too: **external 10:1/20:1/
+100:1 probes**, software-selectable ratio (per the existing scope UI
+feature), not an on-board switched-ratio network. This meaningfully
+simplifies the trigger front-end -- it only needs *one fixed*
+attenuation stage sized for whatever amplitude arrives after an
+appropriate external probe has already been chosen, the same
+relationship the main channels have between their native ADC range and
+external probe ratios. No switching hardware (relays/analog muxes) on
+the trigger board itself.
+
+**Design decision: reuse R1 (the fault-current resistor) as the
+attenuator's series element**, rather than adding a separate stage --
+R1 already sits between the TVS and the local clamp diodes; adding a
+shunt resistor from that same node does double duty (fault-current
+limiting and signal attenuation) without extra series resistance that
+would cost settling time on top of what's already there.
+
+**Bias point, not just attenuation**: ADS8861's common-mode range is 0V
+to V<sub>REF</sub>, not centered on 0V. A bipolar source attenuated
+straight to `AGND` would only use the bottom half of that window (and
+go negative, out of range, on the low half-cycle). The shunt resistor
+references to **V<sub>REF</sub>/2 (1.25V)**, generated from a clean,
+buffered tap off the same reference infrastructure (not a raw resistor
+divider off REF) -- centers the attenuated signal in the middle of the
+ADC's usable range with equal headroom both directions.
+
+**Sizing**: targeting roughly +-1V swing around the 1.25V bias for a
++-20V post-probe signal (comfortable margin under the 0-2.5V window)
+means about 20:1 on-board attenuation. With R1 fixed at 10kOhm:
+
+R<sub>shunt</sub>/(R1 + R<sub>shunt</sub>) = 1/20 -> R<sub>shunt</sub>
+~= 10kOhm/19 ~= 526Ohm -> round to a standard **510Ohm or 560Ohm**.
+
+**Open item**: this shunt resistor sits in parallel with the local
+clamp diodes' own path during a real fault. The diodes should still
+carry the bulk of fault current once conducting (much lower impedance
+than the ~530Ohm shunt), so the earlier ~47%-margin fault-current
+calculation should hold with only a small addition -- but this needs to
+be re-verified with the actual final shunt value once chosen, not
+assumed negligible.
 
 ## ADC choice: bench test on AD7606C-16, switch to AD7606C-18 for the final PCB
 
