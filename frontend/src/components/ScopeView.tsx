@@ -57,6 +57,7 @@ const DEFAULT_CHANNELS: ChannelConfig[] = [
 
 const STORAGE_KEY = "lxscanner-scope-channels";
 const HISTORY_STORAGE_KEY = "lxscanner-scope-history-seconds";
+const CALIBRATED_AT_STORAGE_KEY = "lxscanner-scope-calibrated-at";
 const DIVS_X = 10;
 const DIVS_Y = 8;
 // How much retained history the rolling buffer keeps for Freeze+Pan to
@@ -161,6 +162,16 @@ function loadChannels(): ChannelConfig[] {
     // fall through to defaults
   }
   return DEFAULT_CHANNELS;
+}
+
+function loadCalibratedAt(): Record<number, number> {
+  try {
+    const raw = localStorage.getItem(CALIBRATED_AT_STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as Record<number, number>;
+  } catch {
+    // fall through to empty
+  }
+  return {};
 }
 
 function loadHistorySeconds(): number {
@@ -396,6 +407,13 @@ export function ScopeView() {
 
   type CalStatus = { state: "busy" | "ok" | "error"; message?: string };
   const [calStatus, setCalStatus] = useState<Record<number, CalStatus>>({});
+  // When each channel was last successfully calibrated -- shown on hover
+  // alongside range/attenuation. Persisted since a calibration is a fact
+  // about the physical hookup, not session state.
+  const [calibratedAt, setCalibratedAt] = useState<Record<number, number>>(loadCalibratedAt);
+  useEffect(() => {
+    localStorage.setItem(CALIBRATED_AT_STORAGE_KEY, JSON.stringify(calibratedAt));
+  }, [calibratedAt]);
   const [timebaseBusy, setTimebaseBusy] = useState(false);
   const [rangeBusy, setRangeBusy] = useState<Record<number, boolean>>({});
 
@@ -993,6 +1011,9 @@ export function ScopeView() {
             }
           : { state: "error", message: result.reason ?? "Calibration failed" },
       }));
+      if (result.ok) {
+        setCalibratedAt((s) => ({ ...s, [channelId]: Date.now() }));
+      }
     } catch {
       setCalStatus((s) => ({
         ...s,
@@ -1729,7 +1750,19 @@ export function ScopeView() {
                   onChange={(e) => updateChannel(c.id, { color: e.target.value })}
                   title="Trace color"
                 />
-                <label className="scope-channel-label">
+                <label
+                  className="scope-channel-label"
+                  title={[
+                    `Range: ${rangeOptions.find((r) => r.value === c.rangeV)?.label ?? `±${c.rangeV}V`}`,
+                    `Attenuation: ${
+                      ATTENUATION_OPTIONS.find((a) => a.value === c.attenuation)?.label ??
+                      `${c.attenuation}:1`
+                    }`,
+                    `Calibrated: ${
+                      calibratedAt[c.id] ? new Date(calibratedAt[c.id]).toLocaleString() : "never"
+                    }`,
+                  ].join("\n")}
+                >
                   <input
                     type="checkbox"
                     checked={c.enabled}
