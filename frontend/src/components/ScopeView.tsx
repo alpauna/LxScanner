@@ -33,7 +33,7 @@ interface CursorPair {
 }
 
 type Range = [number, number];
-type DragTarget = "h1" | "h2" | "v1" | "v2" | null;
+type DragTarget = "h1" | "h2" | "v1" | "v2" | "trig" | null;
 
 interface PanStart {
   clientX: number;
@@ -83,6 +83,7 @@ const GAP_THRESHOLD_DT_MULTIPLIER = 3;
 const PLAYBACK_SPEED_OPTIONS = [0.25, 0.5, 1, 2, 4];
 const POST_TRIGGER_SEC_OPTIONS = [0.1, 0.5, 1, 2, 5];
 const DEFAULT_POST_TRIGGER_SEC = 1;
+const NORMAL_TRIGGER_PRETRIGGER_FRACTION = 0.2;
 const SCOPE_SOURCE_LABELS: Record<string, string> = {
   mock: "Mock",
   hantek: "Hantek 1008C",
@@ -372,21 +373,34 @@ export function ScopeView() {
   const [captureListOpen, setCaptureListOpen] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
 
-  // Basic single-shot trigger: arm, wait for one level/edge crossing on
-  // the top channel (channels[0]), auto-capture, auto-stop after
-  // postTriggerSec. No continuous re-trigger ("Normal" scope mode) or
-  // force-trigger-on-timeout ("Auto" mode) -- deliberately out of scope
-  // ("basic triggers only").
+  // Trigger: arm, wait for a level/edge crossing on the top channel
+  // (channels[0]). "single" mode auto-captures and auto-stops after
+  // postTriggerSec (unchanged from the original basic trigger). "normal"
+  // mode never captures -- each crossing just re-pins the live window so
+  // it holds a stable, trigger-aligned sweep instead of scrolling, and
+  // stays armed for the next one. No force-trigger-on-timeout ("Auto"
+  // scope mode) -- still out of scope.
   const [triggerArmed, setTriggerArmed] = useState(false);
   const triggerArmedRef = useRef(triggerArmed);
   triggerArmedRef.current = triggerArmed;
+  const [triggerMode, setTriggerMode] = useState<"single" | "normal">("single");
+  const triggerModeRef = useRef(triggerMode);
+  triggerModeRef.current = triggerMode;
   const [triggerLevel, setTriggerLevel] = useState(0);
+  const triggerLevelRef = useRef(triggerLevel);
+  triggerLevelRef.current = triggerLevel;
   const [triggerEdge, setTriggerEdge] = useState<"rising" | "falling">("rising");
   const [postTriggerSec, setPostTriggerSec] = useState(DEFAULT_POST_TRIGGER_SEC);
   // Most recent raw sample seen on the trigger channel, carried across
   // batch boundaries -- checking only within one batch would miss a
   // crossing that happens exactly at a batch edge.
   const lastTriggerValueRef = useRef<number | null>(null);
+  // Normal mode's held sweep window, driven straight through plot.setScale
+  // (like panScaleXRef/playbackScaleXRef below) rather than setZoomRange --
+  // a fast periodic signal can re-trigger many times a second, and routing
+  // that through React state would rebuild the whole uPlot instance on
+  // every single crossing (the plot-creation effect is keyed on zoomKey).
+  const normalTriggerXRef = useRef<Range | null>(null);
 
   // Playback transport. A loaded/finished capture is static, so unlike
   // live rendering this never needs setData() -- it's pure
@@ -478,6 +492,7 @@ export function ScopeView() {
     h2: HTMLDivElement;
     v1: HTMLDivElement;
     v2: HTMLDivElement;
+    trig: HTMLDivElement;
   } | null>(null);
 
   useEffect(() => {
@@ -621,6 +636,16 @@ export function ScopeView() {
       els.v1.querySelector(".scope-cursor-label")!.textContent = formatRelTime(v.a - t0);
       els.v2.querySelector(".scope-cursor-label")!.textContent = formatRelTime(v.b - t0);
     }
+
+    // Trigger level, draggable -- only meaningful against the live trace,
+    // and re-run from the render tick below so it tracks Y auto-ranging
+    // instead of drifting while the trace is live (not frozen).
+    const showTrig = viewSourceRef.current === "live";
+    els.trig.style.display = showTrig ? "block" : "none";
+    if (showTrig) {
+      els.trig.style.top = `${plot.valToPos(triggerLevelRef.current, "y")}px`;
+      els.trig.querySelector(".scope-cursor-label")!.textContent = `Trig ${triggerLevelRef.current.toFixed(3)} V`;
+    }
   }
 
   useEffect(() => {
@@ -649,6 +674,10 @@ export function ScopeView() {
             // calls would otherwise re-invoke this and yank the played-
             // back position back toward zoomRange.x on every live batch.
             if (playbackScaleXRef.current) return playbackScaleXRef.current;
+            // Normal-mode trigger: same reasoning as pan/playback above --
+            // held here, not in zoomRange, so re-triggering doesn't rebuild
+            // the plot on every crossing.
+            if (normalTriggerXRef.current) return normalTriggerXRef.current;
             if (zoomRange.x) return zoomRange.x;
             // Live: slide a window of the desired Time/div width to
             // follow the newest retained sample, rather than trusting
@@ -690,8 +719,14 @@ export function ScopeView() {
     const h2 = makeCursorEl("h", () => (draggingRef.current = "h2"));
     const v1 = makeCursorEl("v", () => (draggingRef.current = "v1"));
     const v2 = makeCursorEl("v", () => (draggingRef.current = "v2"));
-    plot.over.append(h1, h2, v1, v2);
-    cursorElsRef.current = { h1, h2, v1, v2 };
+    // Disarmed-only, same rule as the Level number input, so dragging
+    // can't silently change what an in-flight detection is checking.
+    const trig = makeCursorEl("h", () => {
+      if (!triggerArmedRef.current) draggingRef.current = "trig";
+    });
+    trig.classList.add("scope-cursor-trig");
+    plot.over.append(h1, h2, v1, v2, trig);
+    cursorElsRef.current = { h1, h2, v1, v2, trig };
     repositionCursors();
 
     plot.over.addEventListener("mousedown", (e) => {
@@ -724,7 +759,7 @@ export function ScopeView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structuralKey, zoomKey]);
 
-  useEffect(repositionCursors, [hCursors, vCursors]);
+  useEffect(repositionCursors, [hCursors, vCursors, triggerLevel, viewSource]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
@@ -747,6 +782,9 @@ export function ScopeView() {
       if (which === "h1" || which === "h2") {
         const val = plot.posToVal(e.clientY - rect.top, "y");
         setHCursors((prev) => (which === "h1" ? { ...prev, a: val } : { ...prev, b: val }));
+      } else if (which === "trig") {
+        const val = plot.posToVal(e.clientY - rect.top, "y");
+        setTriggerLevel(Number(val.toFixed(3)));
       } else {
         const val = plot.posToVal(e.clientX - rect.left, "x");
         setVCursors((prev) => (which === "v1" ? { ...prev, a: val } : { ...prev, b: val }));
@@ -829,14 +867,19 @@ export function ScopeView() {
         // armed doesn't silently need re-arming.
         const rawLevel = (triggerLevel - triggerChannel.offset) / triggerChannel.attenuation;
         let prev = lastTriggerValueRef.current;
-        for (const v of samples) {
+        for (let i = 0; i < samples.length; i++) {
+          const v = samples[i];
           if (prev !== null) {
             const crossed =
               triggerEdge === "rising" ? prev < rawLevel && v >= rawLevel : prev > rawLevel && v <= rawLevel;
             if (crossed) {
-              setTriggerArmed(false);
-              startCapture();
-              setTimeout(stopCapture, postTriggerSec * 1000);
+              if (triggerModeRef.current === "single") {
+                setTriggerArmed(false);
+                startCapture();
+                setTimeout(stopCapture, postTriggerSec * 1000);
+              } else {
+                pinNormalTriggerWindow(newXs[i]);
+              }
               break;
             }
           }
@@ -865,6 +908,10 @@ export function ScopeView() {
         plotRef.current.setData(buildSeriesData());
         dirtyRef.current = false;
         tickCounterRef.current++;
+        // Keeps the trigger-level cursor tracking Y auto-ranging while
+        // live (see repositionCursors) -- cheap, and only runs when a
+        // redraw actually happened.
+        repositionCursors();
         // Y only -- X's "live" range is now computeLiveXRange() (buffer-
         // based, always current), so there's nothing left reading a
         // throttled liveXRange snapshot.
@@ -1173,9 +1220,34 @@ export function ScopeView() {
 
   function toggleTriggerArmed() {
     setTriggerArmed((armed) => {
-      if (!armed) lastTriggerValueRef.current = null; // start fresh, ignore any pre-arm history
+      if (!armed) {
+        lastTriggerValueRef.current = null; // start fresh, ignore any pre-arm history
+      } else if (normalTriggerXRef.current) {
+        // Disarming out of a held Normal sweep -- release it back to
+        // free-run immediately rather than waiting on the next live batch.
+        normalTriggerXRef.current = null;
+        const [min, max] = computeLiveXRange();
+        plotRef.current?.setScale("x", { min, max });
+      }
       return !armed;
     });
+  }
+
+  // Normal-mode trigger: re-pin the live window to a fixed-width sweep
+  // (same width Time/div already implies for the free-run view) aligned
+  // so the crossing sample sits NORMAL_TRIGGER_PRETRIGGER_FRACTION of the
+  // way in -- some pre-trigger context, mostly post-trigger, matching a
+  // real scope's default horizontal position. Y is left untouched: Volts/
+  // div is already a stable, user-set control, not something a trigger
+  // should be re-fitting. Drives the plot directly via normalTriggerXRef
+  // (see its declaration) instead of setZoomRange -- can fire many times
+  // a second on a fast periodic signal.
+  function pinNormalTriggerWindow(triggerTime: number) {
+    const width = timePerDivSecRef.current * DIVS_X;
+    const pretrigger = width * NORMAL_TRIGGER_PRETRIGGER_FRACTION;
+    const x: Range = [triggerTime - pretrigger, triggerTime + (width - pretrigger)];
+    normalTriggerXRef.current = x;
+    plotRef.current?.setScale("x", { min: x[0], max: x[1] });
   }
 
   function startCapture() {
@@ -1470,10 +1542,26 @@ export function ScopeView() {
                 onClick={toggleTriggerArmed}
                 disabled={isCapturing}
                 className={triggerArmed ? "scope-capture-active" : ""}
-                title={`Auto-capture on the next ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`}
+                title={
+                  triggerMode === "single"
+                    ? `Auto-capture on the next ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`
+                    : `Hold a stable sweep, re-triggering on every ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`
+                }
               >
                 {triggerArmed ? "⏹ Disarm" : "⚡ Arm"}
               </button>
+              <label>
+                Mode
+                <select
+                  value={triggerMode}
+                  disabled={triggerArmed}
+                  onChange={(e) => setTriggerMode(e.target.value as "single" | "normal")}
+                  title="Single: one shot, auto-captures and stops. Normal: holds a stable, re-triggered sweep with no capture."
+                >
+                  <option value="single">Single</option>
+                  <option value="normal">Normal</option>
+                </select>
+              </label>
               <label>
                 Level
                 <input
@@ -1496,20 +1584,22 @@ export function ScopeView() {
                   <option value="falling">Falling</option>
                 </select>
               </label>
-              <label>
-                Post-trigger
-                <select
-                  value={postTriggerSec}
-                  disabled={triggerArmed}
-                  onChange={(e) => setPostTriggerSec(Number(e.target.value))}
-                >
-                  {POST_TRIGGER_SEC_OPTIONS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}s
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {triggerMode === "single" && (
+                <label>
+                  Post-trigger
+                  <select
+                    value={postTriggerSec}
+                    disabled={triggerArmed}
+                    onChange={(e) => setPostTriggerSec(Number(e.target.value))}
+                  >
+                    {POST_TRIGGER_SEC_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}s
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </>
           ) : (
             <>
@@ -1643,6 +1733,32 @@ export function ScopeView() {
                     {captureMeta.name} -- {captureMeta.durationSec.toFixed(2)}s
                   </span>
                 )}
+              </div>
+            );
+          })()}
+
+        {viewSource === "live" &&
+          frozen &&
+          xBufferRef.current.length > 0 &&
+          (() => {
+            const bufStart = xBufferRef.current[0];
+            const bufEnd = xBufferRef.current[xBufferRef.current.length - 1];
+            const [curMin, curMax] = zoomRange.x ?? [bufStart, bufEnd];
+            const scrubMax = Math.max(bufEnd - (curMax - curMin), bufStart);
+            return (
+              <div className="scope-scrub-controls">
+                <input
+                  type="range"
+                  min={bufStart}
+                  max={scrubMax}
+                  step={(bufEnd - bufStart) / 1000 || 1}
+                  value={Math.min(curMin, scrubMax)}
+                  onChange={(e) => scrubTo(Number(e.currentTarget.value))}
+                  title="Position within the rolling buffer -- drag to pan through history"
+                />
+                <span className="scope-readout">
+                  T{formatRelTime(curMin - bufEnd)} to T{formatRelTime(curMax - bufEnd)}
+                </span>
               </div>
             );
           })()}

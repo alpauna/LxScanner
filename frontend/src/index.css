@@ -350,6 +350,15 @@ main {
   cursor: ew-resize;
 }
 
+.scope-cursor-trig {
+  border-top: 2px solid #f59e0b;
+}
+
+.scope-cursor-trig .scope-cursor-label {
+  background: rgba(245, 158, 11, 0.85);
+  color: #111;
+}
+
 .scope-cursor-label {
   position: absolute;
   background: rgba(0, 0, 0, 0.75);
