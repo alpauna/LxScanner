@@ -275,6 +275,10 @@ main {
   gap: 0.2rem;
 }
 
+.scope-channel-trigger-radio {
+  accent-color: #f59e0b;
+}
+
 .scope-cal-status {
   font-family: ui-monospace, monospace;
   white-space: nowrap;

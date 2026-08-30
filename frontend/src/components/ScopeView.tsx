@@ -373,8 +373,9 @@ export function ScopeView() {
   const [captureListOpen, setCaptureListOpen] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
 
-  // Trigger: arm, wait for a level/edge crossing on the top channel
-  // (channels[0]). "single" mode auto-captures and auto-stops after
+  // Trigger: arm, wait for a level/edge crossing on the selected channel
+  // (triggerChannelId, radio-selected in the channel panel -- defaults to
+  // channel 0). "single" mode auto-captures and auto-stops after
   // postTriggerSec (unchanged from the original basic trigger). "normal"
   // mode never captures -- each crossing just re-pins the live window so
   // it holds a stable, trigger-aligned sweep instead of scrolling, and
@@ -383,6 +384,9 @@ export function ScopeView() {
   const [triggerArmed, setTriggerArmed] = useState(false);
   const triggerArmedRef = useRef(triggerArmed);
   triggerArmedRef.current = triggerArmed;
+  const [triggerChannelId, setTriggerChannelId] = useState(0);
+  const triggerChannelIdRef = useRef(triggerChannelId);
+  triggerChannelIdRef.current = triggerChannelId;
   const [triggerMode, setTriggerMode] = useState<"single" | "normal">("single");
   const triggerModeRef = useRef(triggerMode);
   triggerModeRef.current = triggerMode;
@@ -644,7 +648,8 @@ export function ScopeView() {
     els.trig.style.display = showTrig ? "block" : "none";
     if (showTrig) {
       els.trig.style.top = `${plot.valToPos(triggerLevelRef.current, "y")}px`;
-      els.trig.querySelector(".scope-cursor-label")!.textContent = `Trig ${triggerLevelRef.current.toFixed(3)} V`;
+      els.trig.querySelector(".scope-cursor-label")!.textContent =
+        `Trig CH${triggerChannelIdRef.current + 1} ${triggerLevelRef.current.toFixed(3)} V`;
     }
   }
 
@@ -759,7 +764,7 @@ export function ScopeView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structuralKey, zoomKey]);
 
-  useEffect(repositionCursors, [hCursors, vCursors, triggerLevel, viewSource]);
+  useEffect(repositionCursors, [hCursors, vCursors, triggerLevel, triggerChannelId, viewSource]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
@@ -858,7 +863,7 @@ export function ScopeView() {
     // exclusive, but this guard is what actually enforces it against
     // the live data path.
     if (triggerArmedRef.current && !isCapturingRef.current) {
-      const triggerChannel = channelsRef.current[0];
+      const triggerChannel = channelsRef.current.find((c) => c.id === triggerChannelIdRef.current);
       const samples = triggerChannel ? batch.channels[String(triggerChannel.id)] : undefined;
       if (triggerChannel && samples && samples.length > 0) {
         // Convert the user-facing display-volts level to raw using the
@@ -1544,8 +1549,8 @@ export function ScopeView() {
                 className={triggerArmed ? "scope-capture-active" : ""}
                 title={
                   triggerMode === "single"
-                    ? `Auto-capture on the next ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`
-                    : `Hold a stable sweep, re-triggering on every ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`
+                    ? `Auto-capture on the next ${triggerEdge} edge of CH${triggerChannelId + 1} crossing ${triggerLevel}V`
+                    : `Hold a stable sweep, re-triggering on every ${triggerEdge} edge of CH${triggerChannelId + 1} crossing ${triggerLevel}V`
                 }
               >
                 {triggerArmed ? "⏹ Disarm" : "⚡ Arm"}
@@ -1570,7 +1575,7 @@ export function ScopeView() {
                   value={triggerLevel}
                   disabled={triggerArmed}
                   onChange={(e) => setTriggerLevel(Number(e.target.value))}
-                  title={`Trigger level, in CH${(channels[0]?.id ?? 0) + 1}'s displayed volts`}
+                  title={`Trigger level, in CH${triggerChannelId + 1}'s displayed volts`}
                 />
               </label>
               <label>
@@ -1914,6 +1919,15 @@ export function ScopeView() {
                     </span>
                   )}
                 </label>
+                <input
+                  type="radio"
+                  name="triggerChannel"
+                  className="scope-channel-trigger-radio"
+                  checked={triggerChannelId === c.id}
+                  disabled={triggerArmed}
+                  onChange={() => setTriggerChannelId(c.id)}
+                  title={`Trigger on CH${c.id + 1}`}
+                />
                 <div className="scope-channel-move">
                   <button onClick={() => moveChannel(i, -1)} disabled={i === 0} title="Move up">
                     ▲
