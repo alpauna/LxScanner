@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+import asyncio
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.models import Mode
+from app.models import Mode, ScopeCaptureCreate, ScopeCaptureMeta
 from app.scope.factory import SCOPE_SOURCES, switch_scope_source
 from app.state import AppState
 
@@ -77,5 +79,33 @@ def register(app_state: AppState) -> APIRouter:
     @router.post("/scope/source")
     async def set_scope_source(req: ScopeSourceRequest) -> dict:
         return await switch_scope_source(app_state, req.source)
+
+    # Scope captures: a wholly separate concept from /session/* above --
+    # SessionRecorder records small discrete OBD/CAN/DTC events into
+    # SQLite, the wrong shape for waveform volume. A capture is built up
+    # entirely in the browser (see ScopeView.tsx) and only reaches here
+    # as one already-complete payload at Save time -- see
+    # app.scope.capture_store's docstring.
+    @router.post("/scope/capture", response_model=ScopeCaptureMeta)
+    async def save_capture(req: ScopeCaptureCreate) -> dict:
+        # Wrapped in to_thread: a synchronous multi-MB gzip+write on the
+        # event loop would stall the concurrent OBD/scope WebSocket pumps.
+        return await asyncio.to_thread(app_state.capture_store.save, req.model_dump())
+
+    @router.get("/scope/captures", response_model=list[ScopeCaptureMeta])
+    async def list_captures() -> list[dict]:
+        return app_state.capture_store.list_meta()
+
+    @router.get("/scope/capture/{capture_id}")
+    async def get_capture(capture_id: str) -> dict:
+        try:
+            return await asyncio.to_thread(app_state.capture_store.load_data, capture_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="capture not found")
+
+    @router.delete("/scope/capture/{capture_id}")
+    async def delete_capture(capture_id: str) -> dict:
+        app_state.capture_store.delete(capture_id)
+        return {"status": "deleted"}
 
     return router

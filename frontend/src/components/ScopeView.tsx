@@ -2,7 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useSocket } from "../ws";
-import { calibrateChannel, getScopeSource, setChannelRange, setScopeSource, setTimebase } from "../api";
+import {
+  calibrateChannel,
+  deleteCapture,
+  getScopeSource,
+  listCaptures,
+  loadCapture,
+  saveCapture,
+  setChannelRange,
+  setScopeSource,
+  setTimebase,
+} from "../api";
+import type { ScopeCaptureMeta } from "../api";
 import type { ScopeEvent } from "../types";
 
 interface ChannelConfig {
@@ -336,6 +347,9 @@ export function ScopeView() {
     durationSec: number;
   };
   const [captureMeta, setCaptureMeta] = useState<CaptureMeta | null>(null);
+  const [capturesList, setCapturesList] = useState<ScopeCaptureMeta[]>([]);
+  const [captureListOpen, setCaptureListOpen] = useState(false);
+  const [captureBusy, setCaptureBusy] = useState(false);
 
   // Playback transport. A loaded/finished capture is static, so unlike
   // live rendering this never needs setData() -- it's pure
@@ -1056,6 +1070,7 @@ export function ScopeView() {
     captureAnchorRef.current = { driverT, wallMs: Date.now() };
     setCaptureMeta(null);
     setIsCapturing(true);
+    setCaptureListOpen(false);
   }
 
   function stopCapture() {
@@ -1077,6 +1092,71 @@ export function ScopeView() {
     // the seamless-transition fix: seed the capture's initial viewport
     // at exactly what was already on screen, not an auto-fit default.
     enterCaptureView(getCurrentXRange(), getCurrentYRange());
+  }
+
+  async function refreshCapturesList() {
+    try {
+      setCapturesList(await listCaptures());
+    } catch {
+      // Backend unreachable -- leave the list as-is, not worth
+      // surfacing an error for a background refresh.
+    }
+  }
+
+  // Raw (unscaled) values throughout -- attenuation/offset are applied
+  // only in buildSeriesData, same convention as the live buffer, so
+  // save/load don't need to know about per-channel display settings.
+  async function saveCurrentCapture() {
+    if (!captureMeta || captureMeta.id) return; // nothing to save, or already saved
+    setCaptureBusy(true);
+    try {
+      const channels = Object.keys(captureBuffersRef.current).map(Number);
+      const data = Object.fromEntries(channels.map((ch) => [ch, captureBuffersRef.current[ch]]));
+      const meta = await saveCapture({
+        name: captureMeta.name,
+        source: captureMeta.source,
+        wall_clock_start_ms: captureMeta.wallClockStartMs,
+        duration_sec: captureMeta.durationSec,
+        channels,
+        xs: captureXRef.current,
+        data,
+      });
+      setCaptureMeta((m) => (m ? { ...m, id: meta.id } : m));
+      void refreshCapturesList();
+    } finally {
+      setCaptureBusy(false);
+    }
+  }
+
+  async function loadCaptureById(meta: ScopeCaptureMeta) {
+    setCaptureBusy(true);
+    try {
+      const loaded = await loadCapture(meta.id);
+      captureXRef.current = loaded.xs;
+      captureBuffersRef.current = Object.fromEntries(
+        Object.entries(loaded.data).map(([ch, arr]) => [Number(ch), arr]),
+      );
+      setCaptureMeta({
+        id: meta.id,
+        name: meta.name ?? meta.id,
+        source: meta.source,
+        wallClockStartMs: meta.wall_clock_start_ms,
+        durationSec: meta.duration_sec,
+      });
+      const xs = captureXRef.current;
+      const end = xs.length ? xs[xs.length - 1] : 1;
+      const span = xs.length > 1 ? xs[xs.length - 1] - xs[0] : 1;
+      const width = Math.min(timePerDivSecRef.current * DIVS_X, span);
+      enterCaptureView([end - width, end], getCurrentYRange());
+      setCaptureListOpen(false);
+    } finally {
+      setCaptureBusy(false);
+    }
+  }
+
+  async function deleteCaptureById(id: string) {
+    await deleteCapture(id);
+    void refreshCapturesList();
   }
 
   // Sets the desired live-window width. For Hantek this also reconfigures
@@ -1257,6 +1337,15 @@ export function ScopeView() {
                   ● Capture
                 </button>
               )}
+              <button
+                onClick={() => {
+                  setCaptureListOpen((o) => !o);
+                  if (!captureListOpen) void refreshCapturesList();
+                }}
+                title="Load a previously saved capture"
+              >
+                📂 Load
+              </button>
             </>
           ) : (
             <>
@@ -1283,9 +1372,38 @@ export function ScopeView() {
                   ))}
                 </select>
               </label>
+              {captureMeta && !captureMeta.id && (
+                <button onClick={() => void saveCurrentCapture()} disabled={captureBusy}>
+                  💾 Save
+                </button>
+              )}
             </>
           )}
         </div>
+
+        {captureListOpen && (
+          <div className="scope-capture-list">
+            {capturesList.length === 0 ? (
+              <span className="scope-readout">No saved captures</span>
+            ) : (
+              capturesList.map((c) => (
+                <div className="scope-capture-list-row" key={c.id}>
+                  <button onClick={() => void loadCaptureById(c)} disabled={captureBusy}>
+                    {c.name ?? c.id} -- {SCOPE_SOURCE_LABELS[c.source] ?? c.source} --{" "}
+                    {c.duration_sec.toFixed(2)}s
+                  </button>
+                  <button
+                    onClick={() => void deleteCaptureById(c.id)}
+                    title="Delete this capture"
+                    className="scope-capture-delete"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
 
         <div className="scope-scale-controls">
           <label>

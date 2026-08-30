@@ -13,6 +13,7 @@ from app.hub import Hub
 from app.obd.esp32_ws import ESP32Source
 from app.obd.mock import MockOBD2Source
 from app.obd.source import OBD2Source
+from app.scope.capture_store import ScopeCaptureStore
 from app.scope.factory import create_scope_driver, pump_scope
 from app.session.recorder import SessionRecorder
 from app.state import AppState
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
     hub = Hub()
     recorder = SessionRecorder()
     hub.on_live_event = recorder.record_live_event
+    capture_store = ScopeCaptureStore()
 
     obd_source: OBD2Source = ESP32Source() if OBD_SOURCE == "esp32" else MockOBD2Source()
     logger.info("OBD2 source: %s", OBD_SOURCE)
@@ -46,6 +48,7 @@ async def lifespan(app: FastAPI):
         obd_source=obd_source,
         scope_driver=scope_driver,
         recorder=recorder,
+        capture_store=capture_store,
         scope_source=SCOPE_SOURCE if SCOPE_SOURCE in ("mock", "hantek", "teensy") else "mock",
     )
     app.state.app_state = state

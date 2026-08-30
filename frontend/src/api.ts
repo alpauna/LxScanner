@@ -73,3 +73,52 @@ export async function setScopeSource(source: string): Promise<SetScopeSourceResu
   });
   return res.json();
 }
+
+export interface ScopeCaptureCreate {
+  name: string | null;
+  source: string;
+  wall_clock_start_ms: number;
+  duration_sec: number;
+  channels: number[];
+  xs: number[];
+  data: Record<number, (number | null)[]>;
+}
+
+export interface ScopeCaptureMeta {
+  id: string;
+  name: string | null;
+  source: string;
+  created_at: number;
+  wall_clock_start_ms: number;
+  duration_sec: number;
+  sample_count: number;
+}
+
+export interface ScopeCaptureData {
+  xs: number[];
+  channels: number[];
+  data: Record<number, (number | null)[]>;
+}
+
+export async function saveCapture(payload: ScopeCaptureCreate): Promise<ScopeCaptureMeta> {
+  const res = await fetch("/api/scope/capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+export async function listCaptures(): Promise<ScopeCaptureMeta[]> {
+  const res = await fetch("/api/scope/captures");
+  return res.json();
+}
+
+export async function loadCapture(id: string): Promise<ScopeCaptureData> {
+  const res = await fetch(`/api/scope/capture/${id}`);
+  return res.json();
+}
+
+export async function deleteCapture(id: string): Promise<void> {
+  await fetch(`/api/scope/capture/${id}`, { method: "DELETE" });
+}

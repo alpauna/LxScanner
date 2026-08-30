@@ -44,4 +44,28 @@ class ScopeBatch(BaseModel):
     channels: dict[int, list[float]]
 
 
+class ScopeCaptureCreate(BaseModel):
+    """A complete, already-built capture handed up from the frontend for
+    Save -- the browser is the source of truth for capture accumulation
+    (see ScopeView.tsx), this is just the persisted-to-disk shape."""
+
+    name: str | None = None
+    source: str
+    wall_clock_start_ms: float
+    duration_sec: float
+    channels: list[int]
+    xs: list[float]
+    data: dict[int, list[float | None]]
+
+
+class ScopeCaptureMeta(BaseModel):
+    id: str
+    name: str | None
+    source: str
+    created_at: float
+    wall_clock_start_ms: float
+    duration_sec: float
+    sample_count: int
+
+
 LiveEvent = PidReading | CanFrame | DtcEvent
