@@ -399,6 +399,16 @@ export function ScopeView() {
   const [timebaseBusy, setTimebaseBusy] = useState(false);
   const [rangeBusy, setRangeBusy] = useState<Record<number, boolean>>({});
 
+  // Range, attenuation, and recalibrate used to be per-channel controls
+  // repeated 8x down the panel. They're now one shared set of controls
+  // that act on whichever channels are checked here -- check a subset,
+  // change a shared value, and it applies only to those.
+  const [bulkTargets, setBulkTargets] = useState<Record<number, boolean>>(() =>
+    Object.fromEntries(DEFAULT_CHANNELS.map((c) => [c.id, true])),
+  );
+  const [bulkRangeV, setBulkRangeV] = useState<number>(5);
+  const [bulkAttenuation, setBulkAttenuation] = useState<number>(1);
+
   // Desired live-window width in seconds, driven by the Time/div control.
   // Promoted to real state (rather than derived from the current zoom
   // span, as before) because the live x-range now has to be *computed*
@@ -989,6 +999,28 @@ export function ScopeView() {
         [channelId]: { state: "error", message: "Request failed" },
       }));
     }
+  }
+
+  function toggleAllBulkTargets(checked: boolean) {
+    setBulkTargets(Object.fromEntries(channels.map((c) => [c.id, checked])));
+  }
+
+  async function applyBulkRange(rangeV: number) {
+    setBulkRangeV(rangeV);
+    await Promise.all(
+      channels.filter((c) => bulkTargets[c.id]).map((c) => applyChannelRange(c.id, rangeV)),
+    );
+  }
+
+  function applyBulkAttenuation(attenuation: number) {
+    setBulkAttenuation(attenuation);
+    channels.forEach((c) => {
+      if (bulkTargets[c.id]) updateChannel(c.id, { attenuation });
+    });
+  }
+
+  async function bulkRecalibrate() {
+    await Promise.all(channels.filter((c) => bulkTargets[c.id]).map((c) => recalibrate(c.id)));
   }
 
   // liveYRange (React state) is throttled for display purposes and can
@@ -1644,6 +1676,49 @@ export function ScopeView() {
           </div>
         </div>
 
+        <div className="scope-channel-bulk-row" title="Range, attenuation, and Recalibrate apply to whichever channels are checked below">
+          <label className="scope-channel-label">
+            <input
+              type="checkbox"
+              checked={channels.length > 0 && channels.every((c) => bulkTargets[c.id])}
+              onChange={(e) => toggleAllBulkTargets(e.target.checked)}
+            />
+            All
+          </label>
+          <select
+            className="scope-channel-range"
+            value={bulkRangeV}
+            disabled={channels.some((c) => bulkTargets[c.id] && rangeBusy[c.id])}
+            onChange={(e) => void applyBulkRange(Number(e.target.value))}
+            title="Input range for the checked channels -- a signal exceeding this clips before it's digitized"
+          >
+            {rangeOptions.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="scope-channel-atten"
+            value={bulkAttenuation}
+            onChange={(e) => applyBulkAttenuation(Number(e.target.value))}
+            title="Probe/attenuator ratio for the checked channels -- scales the displayed voltage to match what's actually at the probe tip"
+          >
+            {ATTENUATION_OPTIONS.map((a) => (
+              <option key={a.value} value={a.value}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => void bulkRecalibrate()}
+            disabled={channels.some((c) => bulkTargets[c.id] && calStatus[c.id]?.state === "busy")}
+            title="Move the scope's built-in cal signal to each checked channel in turn, then recalibrate"
+          >
+            Recalibrate
+          </button>
+        </div>
+
         <div className="scope-channel-list">
           {channels.map((c, i) => (
             <div className="scope-channel-block" key={c.id}>
@@ -1672,6 +1747,24 @@ export function ScopeView() {
                   onChange={(e) => updateChannel(c.id, { offset: Number(e.target.value) })}
                   title={`Position offset: ${c.offset} V`}
                 />
+                <label
+                  className="scope-channel-bulk-target"
+                  title="Include this channel in the shared range/attenuation/Recalibrate controls above"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!bulkTargets[c.id]}
+                    onChange={(e) => setBulkTargets((s) => ({ ...s, [c.id]: e.target.checked }))}
+                  />
+                  {calStatus[c.id] && calStatus[c.id].state !== "busy" && (
+                    <span
+                      className={`scope-cal-status scope-cal-${calStatus[c.id].state}`}
+                      title={calStatus[c.id].message}
+                    >
+                      {calStatus[c.id].state === "ok" ? "✓" : "✗"}
+                    </span>
+                  )}
+                </label>
                 <div className="scope-channel-move">
                   <button onClick={() => moveChannel(i, -1)} disabled={i === 0} title="Move up">
                     ▲
@@ -1684,47 +1777,6 @@ export function ScopeView() {
                     ▼
                   </button>
                 </div>
-              </div>
-              <div className="scope-channel-settings-row">
-                <select
-                  className="scope-channel-range"
-                  value={c.rangeV}
-                  disabled={rangeBusy[c.id]}
-                  onChange={(e) => void applyChannelRange(c.id, Number(e.target.value))}
-                  title="Input range -- a signal exceeding this clips before it's digitized"
-                >
-                  {rangeOptions.map((r) => (
-                    <option key={r.value} value={r.value}>
-                      {r.label}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  className="scope-channel-atten"
-                  value={c.attenuation}
-                  onChange={(e) => updateChannel(c.id, { attenuation: Number(e.target.value) })}
-                  title="Probe/attenuator ratio -- scales the displayed voltage to match what's actually at the probe tip"
-                >
-                  {ATTENUATION_OPTIONS.map((a) => (
-                    <option key={a.value} value={a.value}>
-                      {a.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="scope-channel-cal-row">
-                <button
-                  onClick={() => void recalibrate(c.id)}
-                  disabled={calStatus[c.id]?.state === "busy"}
-                  title="Move the scope's built-in cal signal to this channel first, then recalibrate"
-                >
-                  {calStatus[c.id]?.state === "busy" ? "Calibrating…" : "Recalibrate"}
-                </button>
-                {calStatus[c.id] && calStatus[c.id].state !== "busy" && (
-                  <span className={`scope-cal-status scope-cal-${calStatus[c.id].state}`}>
-                    {calStatus[c.id].state === "ok" ? "✓" : "✗"} {calStatus[c.id].message}
-                  </span>
-                )}
               </div>
             </div>
           ))}

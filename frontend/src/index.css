@@ -255,17 +255,24 @@ main {
   font-size: 0.8rem;
 }
 
-.scope-channel-cal-row {
+.scope-channel-bulk-row {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 0.7rem;
-  padding-left: 1.9rem;
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.35rem;
+  border-bottom: 1px solid #333;
 }
 
-.scope-channel-cal-row button {
+.scope-channel-bulk-row button {
   font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
+}
+
+.scope-channel-bulk-target {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
 }
 
 .scope-cal-status {
@@ -301,12 +308,6 @@ main {
 
 .scope-channel-offset {
   width: 5.5rem;
-}
-
-.scope-channel-settings-row {
-  display: flex;
-  gap: 0.4rem;
-  padding-left: 1.9rem;
 }
 
 .scope-channel-range,
