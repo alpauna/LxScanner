@@ -65,6 +65,7 @@ export default function App() {
         <button onClick={() => setTab("scope")} disabled={tab === "scope"}>
           Scope
         </button>
+        <div id="scope-toolbar-slot" className="scope-toolbar-slot" />
       </nav>
       <main>
         {tab === "live" && <LivePids pids={pids} />}

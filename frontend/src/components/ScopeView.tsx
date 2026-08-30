@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useSocket } from "../ws";
@@ -79,6 +80,8 @@ const DEFAULT_HISTORY_SECONDS = 5;
 // similarly small).
 const GAP_THRESHOLD_DT_MULTIPLIER = 3;
 const PLAYBACK_SPEED_OPTIONS = [0.25, 0.5, 1, 2, 4];
+const POST_TRIGGER_SEC_OPTIONS = [0.1, 0.5, 1, 2, 5];
+const DEFAULT_POST_TRIGGER_SEC = 1;
 const SCOPE_SOURCE_LABELS: Record<string, string> = {
   mock: "Mock",
   hantek: "Hantek 1008C",
@@ -303,6 +306,13 @@ export function ScopeView() {
   const [scopeSource, setScopeSourceState] = useState<string>("mock");
   const [availableSources, setAvailableSources] = useState<string[]>(["mock"]);
   const [sourceBusy, setSourceBusy] = useState(false);
+  // The main toolbar (source/live/freeze/pan/capture/load/trigger) renders
+  // via a portal into a slot in App's nav bar, next to the tab buttons --
+  // it used to clutter the channel panel that floats over the chart.
+  const [toolbarSlot, setToolbarSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setToolbarSlot(document.getElementById("scope-toolbar-slot"));
+  }, []);
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const buffersRef = useRef<Record<number, (number | null)[]>>(
@@ -350,6 +360,22 @@ export function ScopeView() {
   const [capturesList, setCapturesList] = useState<ScopeCaptureMeta[]>([]);
   const [captureListOpen, setCaptureListOpen] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
+
+  // Basic single-shot trigger: arm, wait for one level/edge crossing on
+  // the top channel (channels[0]), auto-capture, auto-stop after
+  // postTriggerSec. No continuous re-trigger ("Normal" scope mode) or
+  // force-trigger-on-timeout ("Auto" mode) -- deliberately out of scope
+  // ("basic triggers only").
+  const [triggerArmed, setTriggerArmed] = useState(false);
+  const triggerArmedRef = useRef(triggerArmed);
+  triggerArmedRef.current = triggerArmed;
+  const [triggerLevel, setTriggerLevel] = useState(0);
+  const [triggerEdge, setTriggerEdge] = useState<"rising" | "falling">("rising");
+  const [postTriggerSec, setPostTriggerSec] = useState(DEFAULT_POST_TRIGGER_SEC);
+  // Most recent raw sample seen on the trigger channel, carried across
+  // batch boundaries -- checking only within one batch would miss a
+  // crossing that happens exactly at a batch edge.
+  const lastTriggerValueRef = useRef<number | null>(null);
 
   // Playback transport. A loaded/finished capture is static, so unlike
   // live rendering this never needs setData() -- it's pure
@@ -761,6 +787,37 @@ export function ScopeView() {
       captureBuffersRef.current = cap.buffers;
     }
 
+    // Basic single-shot trigger: only evaluated while armed and not
+    // already capturing -- the UI keeps Arm and manual Capture mutually
+    // exclusive, but this guard is what actually enforces it against
+    // the live data path.
+    if (triggerArmedRef.current && !isCapturingRef.current) {
+      const triggerChannel = channelsRef.current[0];
+      const samples = triggerChannel ? batch.channels[String(triggerChannel.id)] : undefined;
+      if (triggerChannel && samples && samples.length > 0) {
+        // Convert the user-facing display-volts level to raw using the
+        // *current* attenuation/offset, not a snapshot from when the
+        // level was set -- changing a channel's attenuation while
+        // armed doesn't silently need re-arming.
+        const rawLevel = (triggerLevel - triggerChannel.offset) / triggerChannel.attenuation;
+        let prev = lastTriggerValueRef.current;
+        for (const v of samples) {
+          if (prev !== null) {
+            const crossed =
+              triggerEdge === "rising" ? prev < rawLevel && v >= rawLevel : prev > rawLevel && v <= rawLevel;
+            if (crossed) {
+              setTriggerArmed(false);
+              startCapture();
+              setTimeout(stopCapture, postTriggerSec * 1000);
+              break;
+            }
+          }
+          prev = v;
+        }
+        lastTriggerValueRef.current = prev;
+      }
+    }
+
     // Only redraw if the live buffer is actually what's on screen --
     // otherwise every live batch triggers a wasted setData() against a
     // buffer that isn't even being viewed while looking at a capture.
@@ -1061,6 +1118,13 @@ export function ScopeView() {
     setZoomRange({ x: null, y: null });
   }
 
+  function toggleTriggerArmed() {
+    setTriggerArmed((armed) => {
+      if (!armed) lastTriggerValueRef.current = null; // start fresh, ignore any pre-arm history
+      return !armed;
+    });
+  }
+
   function startCapture() {
     captureXRef.current = xBufferRef.current.slice();
     captureBuffersRef.current = Object.fromEntries(
@@ -1287,7 +1351,9 @@ export function ScopeView() {
         className={`scope-view${panMode ? " pan-mode" : ""}${isPanning ? " pan-dragging" : ""}`}
       />
       <div className="scope-channel-panel">
-        <div className="scope-toolbar">
+        {toolbarSlot &&
+          createPortal(
+            <div className="scope-toolbar">
           <label>
             Source {sourceBusy && "…"}
             <select
@@ -1332,6 +1398,7 @@ export function ScopeView() {
               ) : (
                 <button
                   onClick={startCapture}
+                  disabled={triggerArmed}
                   title="Capture the buffer already on screen plus everything from now until you stop"
                 >
                   ● Capture
@@ -1346,6 +1413,50 @@ export function ScopeView() {
               >
                 📂 Load
               </button>
+              <button
+                onClick={toggleTriggerArmed}
+                disabled={isCapturing}
+                className={triggerArmed ? "scope-capture-active" : ""}
+                title={`Auto-capture on the next ${triggerEdge} edge of CH${(channels[0]?.id ?? 0) + 1} crossing ${triggerLevel}V`}
+              >
+                {triggerArmed ? "⏹ Disarm" : "⚡ Arm"}
+              </button>
+              <label>
+                Level
+                <input
+                  type="number"
+                  step={0.1}
+                  value={triggerLevel}
+                  disabled={triggerArmed}
+                  onChange={(e) => setTriggerLevel(Number(e.target.value))}
+                  title={`Trigger level, in CH${(channels[0]?.id ?? 0) + 1}'s displayed volts`}
+                />
+              </label>
+              <label>
+                Edge
+                <select
+                  value={triggerEdge}
+                  disabled={triggerArmed}
+                  onChange={(e) => setTriggerEdge(e.target.value as "rising" | "falling")}
+                >
+                  <option value="rising">Rising</option>
+                  <option value="falling">Falling</option>
+                </select>
+              </label>
+              <label>
+                Post-trigger
+                <select
+                  value={postTriggerSec}
+                  disabled={triggerArmed}
+                  onChange={(e) => setPostTriggerSec(Number(e.target.value))}
+                >
+                  {POST_TRIGGER_SEC_OPTIONS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}s
+                    </option>
+                  ))}
+                </select>
+              </label>
             </>
           ) : (
             <>
@@ -1379,7 +1490,9 @@ export function ScopeView() {
               )}
             </>
           )}
-        </div>
+            </div>,
+            toolbarSlot
+          )}
 
         {captureListOpen && (
           <div className="scope-capture-list">
