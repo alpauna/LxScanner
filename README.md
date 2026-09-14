@@ -98,6 +98,28 @@ docs/            Wiring/power notes, Hantek 1008C driver notes, Teensy DAQ desig
   its calibration/UI work carries forward regardless (the new driver
   plugs into the same `ScopeDriver` interface with zero frontend
   changes).
+
+  **Target is 8 channels**, with 16 as a later expansion once 8 works
+  correctly. The Teensy 4.1's 1 MB already covers this: at 8 channels ×
+  16-bit it holds **62 ms at 1 MSPS** or **625 ms at 100 kSPS**, against
+  a 20 ms four-stroke cycle at redline, 200 ms at idle and 600 ms at
+  cranking. What the Hantek lacked was never capacity but the
+  **rate-versus-depth trade** — 4000 samples regardless of timebase meant
+  no choice at all. So neither more RAM nor a faster CPU is the
+  constraint here; see `docs/adc-upgrade-candidates.md` for the
+  arithmetic, and for what actually binds first (the ADC link, not the
+  MCU).
+- **Gen 2 — ADS9324 + i.MX RT1170**: the 16-channel path, sketched but
+  deliberately not started. The pairing works because the ADS9324 is
+  **configurable as 2/4/8/16 channels**, so gen 2 can be brought up in
+  8-channel mode against proven gen-1 behaviour and expanded by
+  configuration rather than by another board — and because its serial
+  interface runs **1/2/4/8 lanes**, which keeps even 16 channels at
+  1 MSPS down to 32 Mbit/s per lane and removes any need for a parallel
+  bus. Costs a new board (VQFN-64, plus a 1.8 V analog rail) and a
+  different 4.096 V reference. **Not before 8 channels work** — building
+  it now to obtain 8 channels that already work would be motion without
+  progress. See `docs/adc-upgrade-candidates.md`.
 - **J1850 (PWM + VPW) legacy bus support**: planned, targeting a 2001
   Ford F150 (J1850 PWM) plus GM coverage (J1850 VPW), integrated into
   the ESP32 rather than as a separate device. Full design in
