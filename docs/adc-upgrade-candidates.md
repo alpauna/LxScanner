@@ -6,6 +6,73 @@ relevant here, and one needs confirming.
 
 ---
 
+## Scope is 8 channels — and that changes the answer
+
+**Target is 8 channels.** Sixteen is a later expansion, once 8 works correctly.
+PSRAM is not populated. That reframes everything below, because **at 8 channels
+the Teensy 4.1 already meets the requirement.**
+
+### The arithmetic, at 8 channels × 16-bit (16 bytes per sample set)
+
+| memory | 1 MSPS | 500 kSPS | 100 kSPS | 10 kSPS |
+|---|--:|--:|--:|--:|
+| **Teensy 4.1 internal, 1 MB** | **62 ms** | **125 ms** | **625 ms** | **6.25 s** |
+| STM32H7B3, 1.4 MB | 88 ms | 175 ms | 875 ms | 8.75 s |
+| i.MX RT1170, 2 MB | 125 ms | 250 ms | 1.25 s | 12.5 s |
+| + 8 MB PSRAM | 500 ms | 1.00 s | 5.00 s | 50 s |
+
+Against what a window has to cover:
+
+| | |
+|---|--:|
+| One 4-stroke cycle at 6000 rpm | 20 ms |
+| One 4-stroke cycle at 600 rpm (idle) | 200 ms |
+| One 4-stroke cycle at 200 rpm (cranking) | **600 ms** |
+| One 60 Hz mains cycle | 16.7 ms |
+
+**The existing 1 MB covers all of it, because the rate/depth trade is now
+available.** 1 MSPS × 62 ms holds a redline cycle three times over; 100 kSPS ×
+625 ms holds a complete cranking sequence. **That trade is precisely what the
+Hantek did not have** — 4000 samples regardless of timebase meant no choice at
+all. The fix was never more memory; it was memory you can spend as you like.
+
+### So replacing the CPU is solving a problem that is not there
+
+Asked for a part with more internal memory or a better CPU, the honest answer is
+that neither is the constraint:
+
+- **CPU is not loaded.** 8 channels at 1 MSPS is 16 MB/s, moved by DMA. A
+  600 MHz M7 is not working hard.
+- **More internal RAM is barely available.** 1 MB on the RT1062 is already near
+  the top of what any MCU carries. The realistic steps are **1.4×** (STM32H7B3,
+  1.4 MB) or **2×** (i.MX RT1170, 2 MB). Neither is transformative, and both cost
+  the Teensy ecosystem. ESP32-P4 (768 kB) and RP2350 (520 kB) are *downgrades* on
+  this axis.
+- **PSRAM is the only large lever — 8×** — and it is a populate option on the
+  board already in hand, not a redesign.
+
+**If a replacement is still wanted, i.MX RT1170** is the one worth considering:
+2 MB, 1 GHz M7 plus an M4, USB-HS, and the same NXP family as the RT1062 so the
+DMA and FlexIO work carries over. But it buys 2× on the one axis that is not
+currently binding.
+
+### What actually binds first: the ADC link
+
+| rate (8 ch, 16-bit) | link | serial feasible? |
+|--:|--:|---|
+| 200 kSPS | 26 Mbit/s | yes |
+| **1 MSPS** | **128 Mbit/s** | **no** |
+| 2 MSPS | 256 Mbit/s | no |
+
+Two DOUT lines at 50 MHz give about 100 Mbit/s, so **serial runs out somewhere
+near 600 kSPS on 8 channels**. Above that the ADC's **parallel interface** is
+required — 16 bits wide, driven by FlexIO and DMA on the RT1062.
+
+**That is the design decision a faster ADC forces — not the CPU, and not the
+memory.** Settle the interface before shopping for converters.
+
+---
+
 ## ADS9324 — the one worth looking at
 
 While evaluating second sources for the ECU's analog front end, the **TI
@@ -23,13 +90,15 @@ ADS9324** turned out to be wrong for that board and interesting for this one.
 | Package | VQFN-64, 8 × 8 mm |
 | Supplies | 5 V **and 1.8 V** analog, 1.8–3.3 V digital I/O |
 
-### Why it suits this project specifically
+### Why it suits this project *eventually*
 
-**Sixteen channels is the right number for automotive.** The target vehicle has
-eight coils and eight injectors. An 8-channel DAQ forces a choice between them;
-16 captures ignition and injection **in the same acquisition, on the same
-timebase**. That is the class of measurement this project exists to make, and
-the reason the Hantek was outgrown.
+**Not now** — 8 channels is the current target. But when the expansion comes, the
+argument is that the vehicle has eight coils and eight injectors, so an
+8-channel DAQ forces a choice between them while 16 captures ignition and
+injection **in the same acquisition, on the same timebase**.
+
+Note it needs a **1.8 V analog rail** and a new board either way, so it is a
+second-generation question, not an upgrade path for the current one.
 
 **±12.5 V common mode with differential inputs** matters more than it looks.
 Automotive signals sit on a ground that moves — a coil firing shifts local
