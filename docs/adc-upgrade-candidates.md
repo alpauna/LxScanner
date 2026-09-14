@@ -57,17 +57,51 @@ described in `teensy_daq.md` — slow 60 Hz content and kHz-range ignition event
 
 ---
 
-## [CONFIRM] ADS9817
+## ADS9817 — **2 MSPS**, datasheet still wanted
 
-Requested by name, but **no datasheet has been found for it** — not in either
-repo, and not a part number that could be verified. It may be a real part, or it
-may be a slip for the **ADS9324** above.
+Reported as a **2 MSPS** part. No datasheet is in either repo yet, so channel
+count, package, supplies and interface are all unknown here — drop it in
+`docs/datasheets/` and it can be checked the way the AD7606 family was, pin by
+pin against the document rather than from memory. That method has already caught
+a wrong claim and a wrong assumption in this work.
 
-**Confirm the part number before acting on this note.** If ADS9817 is real, drop
-its datasheet in `docs/datasheets/` and it can be checked the same way the AD7606
-family was — pin by pin, against the actual document rather than from memory.
-That method has already caught one wrong claim and one wrong assumption in this
-work, and it is cheap.
+### But 2 MSPS raises the question that actually decides this
+
+**A faster converter only helps if the capture depth follows.** This project
+exists because the Hantek capped at 4000 samples total — a *depth* limit, not a
+speed one. Doubling sample rate halves the time a given buffer covers, so speed
+without memory makes the original problem worse.
+
+Sustained transfer, for reference:
+
+| ch | MSPS | MB/s | vs USB-HS (~40 MB/s practical) |
+|--:|--:|--:|---|
+| 8 | 1 | 16.0 | fits |
+| 8 | 2 | 32.0 | fits |
+| 16 | 1 | 32.0 | fits |
+| **16** | **2** | **64.0** | **exceeds** |
+
+So beyond about 16 channels at 1 MSPS, **continuous streaming stops being an
+option** — which is fine, because a scope captures a window to RAM and transfers
+afterwards. That makes **memory depth the binding constraint**, exactly as it was
+on the Hantek.
+
+Capture window at 16 channels × 16-bit (32 bytes per sample set):
+
+| memory | 1 MSPS | 2 MSPS |
+|---|--:|--:|
+| Teensy 4.1 internal, ~1 MB | 31 ms | **16 ms** |
+| **+ 8 MB PSRAM** | **250 ms** | **125 ms** |
+
+**PSRAM is what makes a fast part worth having.** On internal RAM alone, 2 MSPS
+buys a 16 ms window — too short to hold a slow 60 Hz cycle alongside the kHz
+ignition content, which is the exact failure described in `teensy_daq.md`. With
+8 MB of PSRAM the same part gives 125 ms, which covers both.
+
+For scale: 8 MB at 16 channels is **250 000 samples per channel**, against the
+Hantek's ~500. **[CHECK]** the PSRAM population on the Teensy 4.1 in hand, and
+whether sustained writes keep up at the target rate — PSRAM bandwidth, not the
+ADC, is then the next thing to verify.
 
 ---
 
