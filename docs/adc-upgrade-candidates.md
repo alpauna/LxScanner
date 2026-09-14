@@ -90,15 +90,64 @@ ADS9324** turned out to be wrong for that board and interesting for this one.
 | Package | VQFN-64, 8 × 8 mm |
 | Supplies | 5 V **and 1.8 V** analog, 1.8–3.3 V digital I/O |
 
-### Why it suits this project *eventually*
+### Gen 2: ADS9324 + i.MX RT1170, and they genuinely belong together
 
-**Not now** — 8 channels is the current target. But when the expansion comes, the
-argument is that the vehicle has eight coils and eight injectors, so an
-8-channel DAQ forces a choice between them while 16 captures ignition and
+The expansion argument is that the vehicle has eight coils and eight injectors,
+so an 8-channel DAQ forces a choice between them while 16 captures ignition and
 injection **in the same acquisition, on the same timebase**.
 
-Note it needs a **1.8 V analog rail** and a new board either way, so it is a
-second-generation question, not an upgrade path for the current one.
+Two details found in the datasheet make this pairing better than a shopping list:
+
+**The ADS9324 is configurable as 2, 4, 8 or 16 channels.** It is not only the
+16-channel part — it *is* the 8-channel part too, in the same silicon. So gen 2
+can be brought up in **8-channel mode against known-good behaviour** and expanded
+to 16 by configuration, with no second board. That matches the plan of proving 8
+before reaching for 16.
+
+**The serial interface is 1, 2, 4 or 8 lanes.** That dissolves the interface wall
+described above — instead of needing a 16-bit parallel bus, bandwidth is bought
+with lanes:
+
+| | total | 4-lane | 8-lane |
+|---|--:|--:|--:|
+| 8 ch @ 1 MSPS | 128 Mbit/s | 32 Mbit/s | 16 Mbit/s |
+| 16 ch @ 1 MSPS | 256 Mbit/s | 64 Mbit/s | 32 Mbit/s |
+
+At 8 lanes even the full 16-channel case is **32 Mbit/s per lane**, which is
+undemanding. The parallel-bus requirement was an AD7606 constraint, not a
+fundamental one.
+
+**The RT1170 side lines up:**
+
+| | 1 MSPS | 100 kSPS |
+|---|--:|--:|
+| 2 MB, 8 ch | 125 ms | 1.25 s |
+| 2 MB, 16 ch | 62.5 ms | 625 ms |
+
+Doubling the channels against doubled memory holds the same window the Teensy
+gives at 8 channels today — and the rate/depth trade still covers a 600 ms
+cranking capture at 100 kSPS. The extra cores earn their place at 32 MB/s
+sustained, and the RT1170's configurable I/O voltage suits a part whose IOVDD
+runs 1.8–3.3 V.
+
+### What gen 2 still costs
+
+- **A new board.** VQFN-64 at 8 × 8 mm, not the LQFP-64, plus an **AVDD_1V8**
+  rail the current design does not generate.
+- **A different reference:** 4.096 V on-chip at 15 ppm/°C, against the AD7606
+  family's 2.5 V. Scaling and calibration both change.
+- **A new part** — datasheet dated December 2025. **[CHECK]** availability before
+  designing around it.
+
+### Sequencing
+
+1. **Now:** prove 8 channels on the existing AD7606 + Teensy 4.1. The memory and
+   CPU already suffice, per the arithmetic above.
+2. **Gen 2:** ADS9324 + RT1170 on a new board, brought up in 8-channel mode
+   against the proven gen-1 behaviour, then expanded to 16 in configuration.
+
+Building a gen-2 board now to obtain 8 channels that already work would be
+motion without progress.
 
 **±12.5 V common mode with differential inputs** matters more than it looks.
 Automotive signals sit on a ground that moves — a coil firing shifts local
